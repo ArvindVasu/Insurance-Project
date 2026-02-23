@@ -24,7 +24,7 @@ from services.Graph_state import GraphState
 from services.llm_service import call_llm
 from services.vanna_service import vanna_configure
 
-DEFAULT_EOI_TEMPLATE_PATH = r".\Documents\Insurance_EOI_Form.docx"
+DEFAULT_EOI_TEMPLATE_PATH = r".\Doc\Insurance_EOI_Form.docx"
 CHECKED_BOX = "\u2611"
 UNCHECKED_BOX = "\u2610"
 
