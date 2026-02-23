@@ -10,6 +10,7 @@ from pypdf import PdfReader
 import io
 import zipfile
 from html import unescape
+import json
 
 import tempfile
 from docx import Document
@@ -92,18 +93,6 @@ LOB_KEYWORDS = {
 }
 
 
-LOB_FOLDERS = {
-    "Marine": os.getenv("GOOGLE_DRIVE_MARINE_FOLDER_ID"),
-    "Casualty": os.getenv("GOOGLE_DRIVE_CASUALTY_FOLDER_ID"),
-    "Property": os.getenv("GOOGLE_DRIVE_PROPERTY_FOLDER_ID"),
-    "Motor": os.getenv("GOOGLE_DRIVE_MOTOR_FOLDER_ID"),
-    "Energy": os.getenv("GOOGLE_DRIVE_ENERGY_FOLDER_ID"),
-    "Aviation": os.getenv("GOOGLE_DRIVE_AVIATION_FOLDER_ID") or os.getenv("GOOGLE_DRIVE_AERO_FOLDER_ID"),
-    "Financial Lines": os.getenv("GOOGLE_DRIVE_FINANCIAL_LINES_FOLDER_ID"),
-    "Construction": os.getenv("GOOGLE_DRIVE_CONSTRUCTION_FOLDER_ID"),
-}
-
-
 def _normalize_env_path(value: str | None) -> str | None:
     if not value:
         return None
@@ -112,6 +101,32 @@ def _normalize_env_path(value: str | None) -> str | None:
     # A bell char in a Windows path usually means "\a" was parsed; restore as "\a".
     cleaned = cleaned.replace("\x07", "\\a")
     return os.path.expandvars(os.path.expanduser(cleaned))
+
+
+def _get_config_value(key: str) -> str | None:
+    env_val = os.getenv(key)
+    if env_val:
+        return str(env_val).strip()
+    try:
+        secret_val = st.secrets.get(key)
+        if isinstance(secret_val, str) and secret_val.strip():
+            return secret_val.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _get_lob_folders() -> dict[str, str | None]:
+    return {
+        "Marine": _get_config_value("GOOGLE_DRIVE_MARINE_FOLDER_ID"),
+        "Casualty": _get_config_value("GOOGLE_DRIVE_CASUALTY_FOLDER_ID"),
+        "Property": _get_config_value("GOOGLE_DRIVE_PROPERTY_FOLDER_ID"),
+        "Motor": _get_config_value("GOOGLE_DRIVE_MOTOR_FOLDER_ID"),
+        "Energy": _get_config_value("GOOGLE_DRIVE_ENERGY_FOLDER_ID"),
+        "Aviation": _get_config_value("GOOGLE_DRIVE_AVIATION_FOLDER_ID") or _get_config_value("GOOGLE_DRIVE_AERO_FOLDER_ID"),
+        "Financial Lines": _get_config_value("GOOGLE_DRIVE_FINANCIAL_LINES_FOLDER_ID"),
+        "Construction": _get_config_value("GOOGLE_DRIVE_CONSTRUCTION_FOLDER_ID"),
+    }
 
 
 def _load_service_account_info_from_secrets() -> dict | None:
@@ -126,7 +141,13 @@ def _load_service_account_info_from_secrets() -> dict | None:
         raw = st.secrets.get("GOOGLE_DRIVE_CREDENTIALS_JSON")
         if raw:
             if isinstance(raw, str):
-                return json.loads(raw)
+                txt = raw.strip()
+                try:
+                    return json.loads(txt)
+                except json.JSONDecodeError:
+                    # Accept accidental wrapped JSON string values.
+                    txt2 = txt.strip("'").strip('"')
+                    return json.loads(txt2)
             return dict(raw)
 
         # Structured table secret
@@ -168,9 +189,10 @@ def detect_lob_from_query(query: str) -> str:
 class IntranetAgent:
 
     def __init__(self, credentials_path: str = None):
-        self.credentials_path = credentials_path or _normalize_env_path(os.getenv("GOOGLE_DRIVE_CREDENTIALS_PATH"))
+        resolved_path = credentials_path or _get_config_value("GOOGLE_DRIVE_CREDENTIALS_PATH")
+        self.credentials_path = _normalize_env_path(resolved_path)
         self.service = self._authenticate()
-        self.embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+        self.embeddings = OpenAIEmbeddings(openai_api_key=_get_config_value("OPENAI_API_KEY"))
         self.policy_index = None
 
     def _authenticate(self):
@@ -210,7 +232,7 @@ class IntranetAgent:
         if not self.service:
             return []
 
-        folder_id = LOB_FOLDERS.get(lob)
+        folder_id = _get_lob_folders().get(lob)
         if not folder_id:
             st.error(f"Folder ID missing for {lob}")
             return []
@@ -244,7 +266,7 @@ class IntranetAgent:
         if not self.service:
             return []
 
-        folder_id = LOB_FOLDERS.get(lob)
+        folder_id = _get_lob_folders().get(lob)
 
         if not folder_id:
             st.error(f"Folder ID missing for {lob}")
