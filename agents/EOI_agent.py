@@ -24,7 +24,8 @@ from services.Graph_state import GraphState
 from services.llm_service import call_llm
 from services.vanna_service import vanna_configure
 
-DEFAULT_EOI_TEMPLATE_PATH = r".\Doc\Insurance_EOI_Form.docx"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_EOI_TEMPLATE_PATH = PROJECT_ROOT / "Doc" / "Insurance_EOI_Form.docx"
 CHECKED_BOX = "\u2611"
 UNCHECKED_BOX = "\u2610"
 
@@ -543,6 +544,31 @@ def _load_template_text(template_path: str) -> str:
     return "\n".join(p.text for p in doc.paragraphs if p.text)
 
 
+def _resolve_template_path(template_path: str | None) -> Path:
+    candidates: list[Path] = []
+    if template_path:
+        candidates.append(Path(template_path))
+
+    env_template = os.getenv("EOI_TEMPLATE_PATH")
+    if env_template:
+        candidates.append(Path(env_template))
+
+    candidates.append(Path(DEFAULT_EOI_TEMPLATE_PATH))
+
+    resolved_candidates: list[Path] = []
+    for candidate in candidates:
+        p = candidate.expanduser()
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        p = p.resolve()
+        resolved_candidates.append(p)
+        if p.exists():
+            return p
+
+    attempted = resolved_candidates[0] if resolved_candidates else Path(DEFAULT_EOI_TEMPLATE_PATH)
+    raise FileNotFoundError(f"EOI template not found: {attempted}")
+
+
 def _build_filled_form_text(user_prompt: str, eoi_state: dict[str, Any], template_text: str) -> str:
     sql_result = eoi_state.get("sql_result")
     if isinstance(sql_result, pd.DataFrame) and not sql_result.empty:
@@ -868,11 +894,9 @@ def _build_styled_eoi_doc(filled_text: str, eoi_state: dict[str, Any] | None = N
 
 
 def generate_eoi_document(user_prompt: str, eoi_state: dict[str, Any], template_path: str | None = None) -> tuple[bytes, str]:
-    path = template_path or os.getenv("EOI_TEMPLATE_PATH") or DEFAULT_EOI_TEMPLATE_PATH
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"EOI template not found: {path}")
+    path = _resolve_template_path(template_path)
 
-    template_text = _load_template_text(path)
+    template_text = _load_template_text(str(path))
     filled_text = _build_filled_form_text(user_prompt, eoi_state, template_text)
 
     broker_fields = dict(eoi_state.get("eoi_broker_fields") or {})
