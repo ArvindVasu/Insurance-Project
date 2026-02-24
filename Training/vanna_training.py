@@ -1,3 +1,239 @@
+import sqlite3
+from pathlib import Path
+
+# Use the correct path to your DB file in Drive
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+db_path = PROJECT_ROOT / "Underwriter_Data.db"
+# conn = sqlite3.connect(str(db_path))
+# cursor = conn.cursor()
+
+# print("connection done with uderwriter")
+# print(cursor)
+#Preview Data from a Table
+# cursor.execute("SELECT * FROM underwriting_dataset LIMIT 5;")
+# rows = cursor.fetchall()
+
+# print("Sample data:")
+# for row in rows:
+#     print(row)
+
+import vanna as vn
+from vanna.remote import VannaDefault
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+vanna_api_key = os.getenv("vanna_api_key")
+vanna_model_name = os.getenv("vanna_model_name")
+
+# print(vanna_api_key)
+# print(vanna_model_name)
+
+vn = VannaDefault(model=vanna_model_name, api_key=vanna_api_key)
+vn.connect_to_sqlite(str(db_path))
+
+
+# Example: training Vanna with your underwriting table
+vn.train(ddl="""
+CREATE TABLE underwriting_dataset (
+	insured_name TEXT,
+	insured_address TEXT,
+    country_of_incorporation TEXT,
+    business_description TEXT,
+    risk_type TEXT,
+	broker_contact TEXT,
+	class_of_business TEXT,
+	submission_date DATE,
+    claims_frequency INT,
+    largest_single_loss FLOAT,
+    incurred_loss FLOAT,
+    ultimate_premium FLOAT,
+    loss_ratio FLOAT,
+    tiv FLOAT 
+);
+""")
+
+vn.train(documentation="""
+
+Underwriting_Dataset Table Documentation
+=========================================
+
+This table contains structured underwriting portfolio data used for AI-driven risk benchmarking,
+loss performance analysis, broker evaluation, and underwriting decision support.
+
+--------------------------------------------
+Core Loss & Performance Metrics
+--------------------------------------------
+
+- claims_frequency:
+  Represents the total number of reported claims for the insured account
+  within the defined observation period (typically 3–5 years).
+  Used to assess frequency-driven risk behavior.
+
+- largest_single_loss:
+  The highest individual claim amount recorded for the insured within the observation period.
+  Used to measure severity exposure.
+
+- incurred_loss:
+  Total loss incurred to date, including:
+  - Paid losses
+  - Case reserves (outstanding reported claims)
+  Excludes future projection unless stated otherwise.
+
+- ultimate_premium:
+  The final expected premium for the policy after adjustments,
+  endorsements, and exposure updates.
+  Used as denominator for performance metrics.
+
+- loss_ratio:
+  Calculated as:
+      (incurred_loss / ultimate_premium) * 100
+  Expressed as percentage.
+  Used to evaluate underwriting profitability.
+  Loss Ratio > 100% indicates underwriting loss before expenses.
+
+--------------------------------------------
+Insured Information
+--------------------------------------------
+
+- insured_name:
+  Legal name of the insured entity.
+
+- insured_address:
+  Primary registered or operational address of the insured.
+
+- country_of_incorporation:
+  Country where the insured entity is legally registered.
+  Used for geographic risk segmentation and regulatory analysis.
+
+- business_description:
+  Short description of insured's primary operations.
+  Used to classify hazard exposure and underwriting appetite.
+
+--------------------------------------------
+Risk Classification
+--------------------------------------------
+
+- risk_type:
+  Specifies underwriting risk category, such as:
+  'Industrial All Risks',
+  'Marine Hull',
+  'Products Liability',
+  'Professional Indemnity',
+  'Energy Offshore',
+  'General Liability'.
+
+  Used to segment portfolio and compare homogeneous exposures.
+
+- class_of_business:
+  Higher-level grouping such as:
+  'Property Damage & BI',
+  'Marine',
+  'Products Liability',
+  'Financial Lines',
+  'Energy',
+  'Casualty'.
+
+  Used for portfolio-level aggregation and capital allocation.
+
+- tiv (Total Insured Value):
+  Represents total value at risk insured under the policy.
+  For Property: total asset value.
+  For Liability: may represent proxy exposure (e.g., turnover-based limit indicator).
+  Used to measure severity potential.
+
+--------------------------------------------
+Broker & Placement Information
+--------------------------------------------
+
+- broker_contact:
+  Name of intermediary or brokerage firm responsible for placement.
+  Used to evaluate broker performance and distribution analytics.
+
+- submission_date:
+  Date the underwriting submission was received.
+  Used for trend analysis, time-based performance tracking,
+  and underwriting cycle assessment.
+
+--------------------------------------------
+Derived / Analytical Metrics
+--------------------------------------------
+
+- Premium to TIV Ratio:
+  Calculated as:
+      ultimate_premium / tiv
+  Used to approximate rate-on-line or pricing adequacy proxy.
+
+- Weighted Portfolio Loss Ratio:
+  Calculated as:
+      SUM(incurred_loss) / SUM(ultimate_premium) * 100
+  Used to evaluate aggregate underwriting performance.
+
+- Risk Band Classification:
+  Suggested segmentation based on loss_ratio:
+      <= 50%   → Low Risk
+      50–80%   → Medium Risk
+      > 80%    → High Risk
+
+- Case Reserve Proxy:
+  If paid_loss is available:
+      Case Reserve = incurred_loss - paid_loss
+
+--------------------------------------------
+Underwriting Interpretation Guidelines
+--------------------------------------------
+
+- Loss Ratio < 60%:
+  Generally attractive risk, subject to trend stability.
+
+- Loss Ratio 60–80%:
+  Acceptable but requires pricing discipline.
+
+- Loss Ratio 80–100%:
+  Marginal; requires loading, deductible adjustment, or referral.
+
+- Loss Ratio > 100%:
+  Underperforming account; strong justification required.
+
+- High Frequency + Low Severity:
+  Operational control issue.
+
+- Low Frequency + High Severity:
+  Catastrophic exposure profile.
+
+--------------------------------------------
+AI / SQL Agent Usage Context
+--------------------------------------------
+
+This dataset is used by:
+- SQL Agent for benchmarking similar risks.
+- Risk Scoring Engine for normalization and weighted scoring.
+- Broker performance analysis.
+- Portfolio concentration risk assessment.
+- Underwriting appetite validation.
+
+All calculations must remain deterministic and auditable.
+LLM models should not calculate performance metrics unless validated against SQL outputs.
+
+--------------------------------------------
+Governance Note
+--------------------------------------------
+
+All derived fields such as loss_ratio must be recalculated
+at query time when possible to avoid data drift.
+
+Underwriting decisions should not rely solely on loss_ratio
+but must consider:
+- Risk type
+- Geographic exposure
+- Portfolio correlation
+- Limit adequacy
+- Broker quality
+
+""")
+
+# Question SQL Pairs
+
 vn.train(
     question="What is the average loss ratio by risk type?",
     sql="""
@@ -345,4 +581,6 @@ vn.train(
       AND tiv > 50000000;
     """
 )
+
+
 
