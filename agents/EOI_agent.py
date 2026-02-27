@@ -6,14 +6,24 @@ import io
 import json
 import os
 import re
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
-from pypdf import PdfReader
+try:
+    from pypdf import PdfReader  # type: ignore
+except Exception:
+    try:
+        from PyPDF2 import PdfReader  # type: ignore
+    except Exception:
+        PdfReader = None  # type: ignore
 
 from agents.document_agent import document_node
 from agents.intranet_agent import intranet_node
@@ -26,8 +36,32 @@ from services.vanna_service import vanna_configure
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EOI_TEMPLATE_PATH = PROJECT_ROOT / "Doc" / "Insurance_EOI_Form.docx"
+PDF_EOI_TEMPLATE_PATH = PROJECT_ROOT / "Doc" / "Insurance_EOI_Form.pdf"
+DEFAULT_EOI_DB_PATH = PROJECT_ROOT / "Underwriter_Data.db"
 CHECKED_BOX = "\u2611"
 UNCHECKED_BOX = "\u2610"
+
+SCORE_BANDS = {
+    "write": 50,
+    "conditional": 70,
+    "refer": 85,
+}
+
+METRIC_WEIGHTS = {
+    "loss_ratio": 0.25,
+    "portfolio_comparison": 0.15,
+    "revenue_scale_risk": 0.10,
+    "geographic_spread_risk": 0.15,
+    "risk_management_quality": 0.10,
+    "external_risk": 0.10,
+    "coverage_complexity": 0.10,
+    "guideline_fit": 0.05,
+}
+
+WEB_RISK_BANDS = {
+    "low_max": 30.0,
+    "moderate_max": 60.0,
+}
 
 FIELD_LABELS = {
     "registered_address": "Registered Address",
@@ -88,6 +122,8 @@ def _extract_doc_text(path: str) -> str:
         return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
     if ext == ".pdf":
+        if PdfReader is None:
+            raise RuntimeError("PDF reader library not installed. Install `pypdf`.")
         reader = PdfReader(path)
         return "\n".join((p.extract_text() or "") for p in reader.pages)
 
@@ -207,6 +243,157 @@ TEXT:
     return fields
 
 
+def _extract_risk_profile_json(user_prompt: str, doc_text: str, broker_fields: dict[str, str]) -> dict[str, Any]:
+    base = {
+        "lob": _infer_lob_hint(f"{user_prompt}\n{doc_text}") or "Not specified",
+        "tiv": broker_fields.get("expected_sum_insured") or "Not specified",
+        "turnover": "Not specified",
+        "sites": "Not specified",
+    }
+    if not doc_text.strip():
+        return base
+
+    prompt = f"""
+Extract a concise risk profile JSON from the broker submission.
+Return ONLY valid JSON with keys exactly:
+- lob
+- tiv
+- turnover
+- sites
+
+If unavailable, return "Not specified".
+
+USER PROMPT:
+{user_prompt}
+
+BROKER FIELDS:
+{json.dumps(broker_fields, indent=2)}
+
+DOCUMENT TEXT:
+{doc_text[:12000]}
+"""
+    try:
+        raw = call_llm(prompt)
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            return base
+        parsed = json.loads(match.group(0))
+        out = {
+            "lob": str(parsed.get("lob") or base["lob"]).strip(),
+            "tiv": str(parsed.get("tiv") or base["tiv"]).strip(),
+            "turnover": str(parsed.get("turnover") or base["turnover"]).strip(),
+            "sites": str(parsed.get("sites") or base["sites"]).strip(),
+        }
+        return out
+    except Exception:
+        return base
+
+
+def _extract_geo_tokens(user_prompt: str, risk_profile: dict[str, Any] | None, broker_fields: dict[str, str] | None) -> list[str]:
+    profile = risk_profile or {}
+    fields = broker_fields or {}
+    text = " ".join(
+        [
+            str(user_prompt or ""),
+            str(profile.get("lob") or ""),
+            str(profile.get("sites") or ""),
+            str(profile.get("turnover") or ""),
+            str(fields.get("country") or ""),
+            str(fields.get("state") or ""),
+            str(fields.get("registered_address") or ""),
+        ]
+    )
+    candidates = re.findall(r"\b[A-Za-z][A-Za-z\s]{2,30}\b", text)
+    stop = {
+        "line of business", "not specified", "insurance", "risk", "submission",
+        "expected sum insured", "coverage amount", "registered address",
+    }
+    tokens: list[str] = []
+    for c in candidates:
+        t = re.sub(r"\s+", " ", c).strip().lower()
+        if t in stop or len(t) < 3:
+            continue
+        if t not in tokens:
+            tokens.append(t)
+    return tokens[:12]
+
+
+def _compute_web_geo_risk(
+    user_prompt: str,
+    web_summary: str,
+    web_links: list | None,
+    risk_profile: dict[str, Any] | None,
+    broker_fields: dict[str, str] | None,
+) -> dict[str, Any]:
+    link_text = " ".join(
+        [
+            f"{item[0]} {item[1]}"
+            for item in (web_links or [])
+            if isinstance(item, (list, tuple)) and len(item) >= 2
+        ]
+    )
+    low = f"{(web_summary or '')} {link_text}".lower()
+    geo_tokens = _extract_geo_tokens(user_prompt, risk_profile, broker_fields)
+    if "global" in (user_prompt or "").lower() or "international" in (user_prompt or "").lower():
+        geo_tokens.append("global")
+
+    severe_markers = [
+        "severe", "major", "critical", "high", "escalation", "active", "widespread", "persistent"
+    ]
+    moderate_markers = [
+        "moderate", "watch", "elevated", "potential", "localized", "sporadic"
+    ]
+
+    hazard_groups = {
+        "calamity": ["flood", "earthquake", "cyclone", "storm", "wildfire", "drought", "hurricane", "landslide", "natcat", "catastrophe"],
+        "crime": ["crime", "theft", "burglary", "vandalism", "riot", "violence", "terror", "kidnap", "fraud", "cyber attack"],
+        "strike": ["strike", "labor unrest", "industrial action", "walkout", "protest", "civil commotion", "srcc"],
+    }
+
+    score = 15.0
+    drivers: list[str] = []
+    detected: dict[str, bool] = {k: False for k in hazard_groups}
+
+    for group, words in hazard_groups.items():
+        group_hits = [w for w in words if w in low]
+        if not group_hits:
+            continue
+        detected[group] = True
+
+        points = 10.0
+        points += min(12.0, 2.5 * (len(group_hits) - 1))
+        if any(m in low for m in severe_markers):
+            points += 12.0
+        elif any(m in low for m in moderate_markers):
+            points += 6.0
+
+        score += points
+        drivers.append(f"{group.title()} signals: {', '.join(group_hits[:3])}")
+
+    if geo_tokens:
+        score += min(12.0, len(geo_tokens) * 1.2)
+        drivers.append(f"Geography analyzed: {', '.join(geo_tokens[:4])}")
+
+    score = max(0.0, min(100.0, round(score, 2)))
+    if score < WEB_RISK_BANDS["low_max"]:
+        level = "LOW"
+    elif score <= WEB_RISK_BANDS["moderate_max"]:
+        level = "MODERATE"
+    else:
+        level = "HIGH"
+
+    if not drivers:
+        drivers = ["No significant calamity/crime/strike indicators found in web summary."]
+
+    return {
+        "score": score,
+        "level": level,
+        "detected_hazards": detected,
+        "geo_tokens": geo_tokens,
+        "drivers": drivers,
+    }
+
+
 def summarize_doc_with_instruction(doc_path: str, instruction: str) -> str:
     if not doc_path or not os.path.exists(doc_path):
         return "No document uploaded."
@@ -294,20 +481,404 @@ def build_serp_prompt(user_prompt: str) -> str:
     )
 
 
-def _run_internal_sql(vanna_prompt: str) -> tuple[str | None, pd.DataFrame | None]:
+def _resolve_eoi_db_path() -> Path:
+    candidates = [
+        os.getenv("EOI_DB_PATH"),
+        os.getenv("UNDERWRITER_DB_PATH"),
+        str(DEFAULT_EOI_DB_PATH),
+        str(Path(DB_PATH)),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        p = Path(candidate).expanduser()
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        p = p.resolve()
+        if p.exists():
+            return p
+    return DEFAULT_EOI_DB_PATH
+
+
+def _resolve_underwriting_table(conn: sqlite3.Connection) -> str:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+    names = [str(r[0]) for r in rows if r and r[0]]
+    if not names:
+        raise RuntimeError("No tables found in underwriting database.")
+
+    preferred = [
+        "underwriting_dataset",
+        "underwriter_data",
+        "underwriting_data",
+        "portfolio",
+    ]
+    lowered = {n.lower(): n for n in names}
+    for key in preferred:
+        if key in lowered:
+            return lowered[key]
+
+    return names[0]
+
+
+def _to_float(value: Any) -> float | None:
     try:
-        vanna_out = vanna_node({"user_prompt": vanna_prompt})
-        sql_query = vanna_out.get("sql_query")
-        result = vanna_out.get("sql_result")
-        if isinstance(result, pd.DataFrame):
-            return sql_query, result
-        if isinstance(result, list):
-            return sql_query, pd.DataFrame(result)
-        if result is None:
-            return sql_query, pd.DataFrame()
-        return sql_query, pd.DataFrame([{"Result": str(result)}])
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        txt = re.sub(r"[^0-9.\-]", "", str(value))
+        if not txt:
+            return None
+        return float(txt)
+    except Exception:
+        return None
+
+
+def _extract_client_loss_ratio(
+    user_prompt: str,
+    broker_fields: dict[str, str] | None,
+    broker_text: str | None,
+) -> tuple[float | None, str]:
+    """
+    Try to extract client-specific loss ratio from available text sources.
+    Returns (value, source_label). Value can be in either ratio or percent scale.
+    """
+    fields = broker_fields or {}
+    candidates = [
+        ("claims_history", str(fields.get("claims_history") or "")),
+        ("user_prompt", str(user_prompt or "")),
+        ("broker_text", str(broker_text or "")),
+    ]
+    patterns = [
+        r"loss\s*ratio[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*%",
+        r"loss\s*ratio[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)",
+    ]
+    for src, text in candidates:
+        low = text.lower()
+        for pat in patterns:
+            m = re.search(pat, low, flags=re.IGNORECASE)
+            if not m:
+                continue
+            val = _to_float(m.group(1))
+            if val is not None:
+                return val, src
+    return None, "not_found"
+
+
+def _align_loss_ratio_scale(client_ratio: float, portfolio_series: pd.Series) -> float:
+    """
+    Normalize client ratio scale to portfolio scale:
+    - portfolio likely percent if median > 1.5
+    - portfolio likely fraction if median <= 1.5
+    """
+    if portfolio_series.empty:
+        return client_ratio
+    med = float(portfolio_series.median())
+    portfolio_is_percent = med > 1.5
+    client_is_percent = client_ratio > 1.5
+    if portfolio_is_percent and not client_is_percent:
+        return client_ratio * 100.0
+    if not portfolio_is_percent and client_is_percent:
+        return client_ratio / 100.0
+    return client_ratio
+
+
+def _run_internal_sql(
+    vanna_prompt: str,
+    user_prompt: str = "",
+    broker_fields: dict[str, str] | None = None,
+    broker_text: str | None = None,
+) -> tuple[str | None, pd.DataFrame | None]:
+    broker_fields = broker_fields or {}
+    lob_hint = _infer_lob_hint(f"{user_prompt} {broker_fields.get('claims_history', '')}") or ""
+    db_path = _resolve_eoi_db_path()
+    sql_query = ""
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            table = _resolve_underwriting_table(conn)
+            col_rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+            columns = {str(r[1]).lower() for r in col_rows if len(r) > 1}
+
+            def has_col(name: str) -> bool:
+                return name.lower() in columns
+
+            def agg_or_null(col: str, func: str, alias: str) -> str:
+                return f"{func}({col}) AS {alias}" if has_col(col) else f"NULL AS {alias}"
+
+            select_parts = [
+                "COUNT(*) AS account_count",
+                agg_or_null("loss_ratio", "AVG", "avg_loss_ratio"),
+                agg_or_null("claims_frequency", "AVG", "avg_claims_frequency"),
+                agg_or_null("largest_single_loss", "AVG", "avg_largest_single_loss"),
+                agg_or_null("ultimate_premium", "AVG", "avg_ultimate_premium"),
+                agg_or_null("incurred_loss", "SUM", "total_incurred_loss"),
+            ]
+
+            filters = []
+            params: list[Any] = []
+            if lob_hint:
+                lob_filter_parts = []
+                if has_col("class_of_business"):
+                    lob_filter_parts.append("LOWER(class_of_business) LIKE ?")
+                    params.append(f"%{lob_hint.lower()}%")
+                if has_col("risk_type"):
+                    lob_filter_parts.append("LOWER(risk_type) LIKE ?")
+                    params.append(f"%{lob_hint.lower()}%")
+                if lob_filter_parts:
+                    filters.append("(" + " OR ".join(lob_filter_parts) + ")")
+
+            sql_query = f"SELECT {', '.join(select_parts)} FROM {table}"
+            if filters:
+                sql_query += " WHERE " + " AND ".join(filters)
+
+            stats_df = pd.read_sql_query(sql_query, conn, params=params)
+            if has_col("loss_ratio"):
+                dist_query = f"SELECT loss_ratio FROM {table} WHERE loss_ratio IS NOT NULL"
+            else:
+                dist_query = "SELECT NULL AS loss_ratio WHERE 1=0"
+            dist_params: list[Any] = []
+            if filters and has_col("loss_ratio"):
+                dist_query += " AND " + " AND ".join(filters)
+                dist_params = params
+            loss_ratio_df = pd.read_sql_query(dist_query, conn, params=dist_params)
+        finally:
+            conn.close()
+
+        if stats_df.empty:
+            return sql_query, pd.DataFrame([{"Error": "No rows returned from underwriting_dataset."}])
+
+        avg_loss_ratio = _to_float(stats_df.iloc[0].get("avg_loss_ratio"))
+        client_loss_ratio_raw, client_lr_source = _extract_client_loss_ratio(
+            user_prompt=user_prompt,
+            broker_fields=broker_fields,
+            broker_text=broker_text,
+        )
+        percentile = None
+        percentile_basis = "portfolio_avg_loss_ratio"
+        client_loss_ratio_aligned = None
+        if not loss_ratio_df.empty:
+            series = pd.to_numeric(loss_ratio_df["loss_ratio"], errors="coerce").dropna()
+            if not series.empty:
+                if client_loss_ratio_raw is not None:
+                    client_loss_ratio_aligned = _align_loss_ratio_scale(client_loss_ratio_raw, series)
+                    percentile = float((series <= client_loss_ratio_aligned).mean() * 100.0)
+                    percentile_basis = "client_loss_ratio"
+                else:
+                    percentile = 50.0
+                    percentile_basis = "neutral_default"                    
+                # elif avg_loss_ratio is not None:
+                #     # Backward-compatible fallback when client ratio is unavailable.
+                #     percentile = float((series <= avg_loss_ratio).mean() * 100.0)
+
+        stats_df["loss_ratio_percentile"] = percentile
+        stats_df["loss_ratio_percentile_basis"] = percentile_basis
+        stats_df["client_loss_ratio"] = client_loss_ratio_aligned
+        stats_df["client_loss_ratio_source"] = client_lr_source
+        stats_df["lob_hint"] = lob_hint or "Not inferred"
+        stats_df["source_db"] = str(db_path)
+        return sql_query, stats_df
     except Exception as exc:
-        return None, pd.DataFrame([{"Error": f"SQL Execution failed: {exc}"}])
+        # Keep backward compatibility by trying Vanna if direct DB benchmark fails.
+        try:
+            vanna_out = vanna_node({"user_prompt": vanna_prompt})
+            vanna_query = vanna_out.get("sql_query") or sql_query
+            result = vanna_out.get("sql_result")
+            if isinstance(result, pd.DataFrame):
+                return vanna_query, result
+            if isinstance(result, list):
+                return vanna_query, pd.DataFrame(result)
+            if result is None:
+                return vanna_query, pd.DataFrame()
+            return vanna_query, pd.DataFrame([{"Result": str(result)}])
+        except Exception:
+            return sql_query, pd.DataFrame([{"Error": f"SQL Execution failed: {exc}"}])
+
+
+def _normalize_loss_ratio(value: float | None) -> float:
+    if value is None:
+        return 55.0
+    if value <= 40:
+        return 15.0
+    if value <= 60:
+        return 30.0
+    if value <= 80:
+        return 50.0
+    if value <= 100:
+        return 70.0
+    if value <= 120:
+        return 85.0
+    return 100.0
+
+
+def _keyword_score(text: str, positive: list[str], negative: list[str], neutral_default: float = 50.0) -> float:
+    low = (text or "").lower()
+    pos = sum(1 for w in positive if w in low)
+    neg = sum(1 for w in negative if w in low)
+    if pos == 0 and neg == 0:
+        return neutral_default
+    if pos >= neg:
+        return max(5.0, 45.0 - 7.0 * (pos - neg))
+    return min(100.0, 55.0 + 9.0 * (neg - pos))
+
+
+def _extract_conditions(doc_insights: str, intranet_summary: str, web_summary: str, risk_score: float) -> list[str]:
+    conditions = [
+        "Final underwriting approval subject to complete KYC and sanctions screening.",
+        "Subject to policy wording alignment with internal underwriting guidelines.",
+    ]
+    low = f"{doc_insights}\n{intranet_summary}\n{web_summary}".lower()
+    if "flood" in low or "earthquake" in low or "catastrophe" in low:
+        conditions.append("Apply catastrophe sub-limit and consider peril-specific deductible.")
+    if "litigation" in low or "adverse media" in low:
+        conditions.append("Require enhanced due diligence and legal review before bind.")
+    if "high" in low and "loss" in low:
+        conditions.append("Apply claims loading and require risk-improvement plan.")
+    if risk_score > SCORE_BANDS["write"]:
+        conditions.append("Refer final terms and authority sign-off to senior underwriter.")
+    return conditions[:5]
+
+
+def _compute_risk_decision(
+    user_prompt: str,
+    broker_text: str,
+    broker_fields: dict[str, str],
+    risk_profile: dict[str, Any] | None,
+    sql_result: pd.DataFrame | None,
+    web_summary: str,
+    web_risk: dict[str, Any] | None,
+    intranet_summary: str,
+    doc_insights: str,
+) -> dict[str, Any]:
+    row = {}
+    if isinstance(sql_result, pd.DataFrame) and not sql_result.empty:
+        row = sql_result.fillna("").iloc[0].to_dict()
+
+    # avg_loss_ratio = _to_float(row.get("avg_loss_ratio"))
+    client_lr = _to_float(row.get("client_loss_ratio"))
+    avg_loss_ratio = client_lr if client_lr is not None else _to_float(row.get("avg_loss_ratio"))
+    
+    percentile = _to_float(row.get("loss_ratio_percentile"))
+    sum_insured = _to_float(broker_fields.get("expected_sum_insured"))
+    profile = risk_profile or {}
+    turnover_val = _to_float(profile.get("turnover"))
+    sites_val = _to_float(profile.get("sites"))
+
+    low_intranet = (intranet_summary or "").lower()
+    low_web = (web_summary or "").lower()
+    low_doc = (doc_insights or "").lower()
+    combined = f"{user_prompt}\n{broker_text}\n{intranet_summary}\n{web_summary}"
+    countries = set(re.findall(r"\b(?:in|across|from)\s+([A-Za-z ]{3,30})", combined, flags=re.IGNORECASE))
+    web_risk_score = float((web_risk or {}).get("score") or 50.0)
+
+    hard_rules = []
+    if any(x in low_web for x in ["sanction", "ofac", "blacklist"]):
+        hard_rules.append("Sanctions hit detected in external screening.")
+    if avg_loss_ratio is not None and avg_loss_ratio > 120:
+        hard_rules.append(f"Average loss ratio above decline threshold ({avg_loss_ratio:.1f} > 120).")
+    if any(x in low_intranet for x in ["exceeds authority", "beyond authority", "referral required"]):
+        hard_rules.append("Requested limit exceeds delegated authority.")
+    if any(x in low_intranet for x in ["do not underwrite", "decline", "prohibited"]):
+        hard_rules.append("Guideline hard-stop identified in intranet policy.")
+
+    metric_scores = {
+        "loss_ratio": _normalize_loss_ratio(avg_loss_ratio),
+        "portfolio_comparison": max(0.0, min(100.0, percentile if percentile is not None else 50.0)),
+        "revenue_scale_risk": (
+            70.0
+            if (turnover_val or 0) >= 500000000
+            else 60.0
+            if (sum_insured or 0) >= 100000000
+            else 40.0
+            if (turnover_val or sum_insured)
+            else 50.0
+        ),
+        "geographic_spread_risk": min(
+            95.0,
+            20.0 + 15.0 * max(0, int(sites_val) - 1) if sites_val is not None else 20.0 + 15.0 * max(0, len(countries) - 1),
+        ),
+        "risk_management_quality": _keyword_score(
+            low_doc,
+            positive=["strong controls", "certified", "iso", "compliant", "risk management framework"],
+            negative=["weak control", "control gap", "incident", "non-compliance", "poor governance"],
+            neutral_default=50.0,
+        ),
+        "external_risk": _keyword_score(
+            low_web,
+            positive=["stable", "favorable", "low volatility", "no major incident"],
+            negative=["litigation", "adverse media", "catastrophe", "esg concern", "geopolitical"],
+            neutral_default=web_risk_score,
+        ),
+        "coverage_complexity": _keyword_score(
+            (user_prompt + " " + broker_text).lower(),
+            positive=["standard coverage", "single line"],
+            negative=["umbrella", "excess", "multi-country", "manuscript wording", "bespoke"],
+            neutral_default=45.0,
+        ),
+        "guideline_fit": _keyword_score(
+            low_intranet,
+            positive=["within appetite", "accepted", "business written"],
+            negative=["outside appetite", "not written", "excluded", "restricted"],
+            neutral_default=50.0,
+        ),
+    }
+
+    weighted = {k: metric_scores[k] * METRIC_WEIGHTS[k] for k in METRIC_WEIGHTS}
+    risk_score = round(sum(weighted.values()), 2)
+
+    available_signals = 0
+    for signal in [avg_loss_ratio, percentile, web_summary, intranet_summary, doc_insights]:
+        if signal not in [None, "", []]:
+            available_signals += 1
+    confidence = round(min(98.0, 45.0 + available_signals * 10.0), 1)
+
+    if any("sanctions hit" in h.lower() for h in hard_rules):
+        decision = "DECLINE"
+    elif any("above decline threshold" in h.lower() or "hard-stop" in h.lower() for h in hard_rules):
+        decision = "DECLINE"
+    elif any("exceeds delegated authority" in h.lower() for h in hard_rules):
+        decision = "REFER"
+    elif risk_score < SCORE_BANDS["write"]:
+        decision = "WRITE"
+    elif risk_score <= SCORE_BANDS["conditional"]:
+        decision = "WRITE_WITH_CONDITIONS"
+    elif risk_score <= SCORE_BANDS["refer"]:
+        decision = "REFER"
+    else:
+        decision = "DECLINE"
+
+    top_risks = sorted(weighted.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_positives = sorted(weighted.items(), key=lambda x: x[1])[:3]
+    key_risk_drivers = [f"{k.replace('_', ' ').title()} ({metric_scores[k]:.1f}/100)" for k, _ in top_risks]
+    key_positive_factors = [f"{k.replace('_', ' ').title()} ({metric_scores[k]:.1f}/100)" for k, _ in top_positives]
+
+    conditions = _extract_conditions(doc_insights, intranet_summary, web_summary, risk_score)
+    if decision not in {"WRITE_WITH_CONDITIONS", "REFER"}:
+        conditions = []
+
+    decision_doc_type = {
+        "WRITE": "AUTO_EOI",
+        "WRITE_WITH_CONDITIONS": "CONDITIONAL_EOI",
+        "REFER": "UNDERWRITING_MEMO",
+        "DECLINE": "DECLINE_LETTER",
+    }.get(decision, "UNDERWRITING_MEMO")
+
+    return {
+        "decision": decision,
+        "decision_document_type": decision_doc_type,
+        "risk_score": risk_score,
+        "confidence_score": confidence,
+        "web_risk_score": web_risk_score,
+        "hard_rule_triggered": bool(hard_rules),
+        "hard_rule_hits": hard_rules,
+        "key_positive_factors": key_positive_factors,
+        "key_risk_drivers": key_risk_drivers,
+        "conditions": conditions,
+        "metric_scores": {k: round(v, 2) for k, v in metric_scores.items()},
+        "weighted_contributions": {k: round(v, 2) for k, v in weighted.items()},
+        "normalization_layer": {k: round(v, 2) for k, v in metric_scores.items()},
+    }
 
 
 def _run_external_search(prompt: str) -> dict[str, Any]:
@@ -324,6 +895,28 @@ def _run_external_search(prompt: str) -> dict[str, Any]:
             "web_links": [("SERP API request failed (no links available)", str(exc))],
             "general_summary": f"External search failed: {exc}",
         }
+
+
+def _build_geo_risk_prompt(user_prompt: str, risk_profile: dict[str, Any] | None, broker_fields: dict[str, str] | None) -> str:
+    profile = risk_profile or {}
+    fields = broker_fields or {}
+    geography_parts = [
+        str(fields.get("country") or "").strip(),
+        str(fields.get("state") or "").strip(),
+        str(profile.get("sites") or "").strip(),
+    ]
+    geography = ", ".join([g for g in geography_parts if g]) or "reported insured locations"
+    return (
+        f"{user_prompt}\n"
+        f"Geography focus: {geography}.\n"
+        "Using web sources, assess geography-specific risk for calamities (flood/earthquake/storm/wildfire), "
+        "crime/violence, and strike/labor unrest. Include location-specific signals and severity."
+    )
+
+
+def _run_geo_risk_search(user_prompt: str, risk_profile: dict[str, Any] | None, broker_fields: dict[str, str] | None) -> dict[str, Any]:
+    geo_prompt = _build_geo_risk_prompt(user_prompt, risk_profile, broker_fields)
+    return _run_external_search(geo_prompt) | {"geo_prompt": geo_prompt}
 
 
 def _infer_lob_hint(text: str) -> str | None:
@@ -451,6 +1044,7 @@ def _build_executive_snapshot(
     web_summary: str,
     web_links: list,
     intranet_summary: str,
+    decision_payload: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     if isinstance(sql_result, pd.DataFrame) and not sql_result.empty:
         sql_context = sql_result.head(6).to_markdown(index=False)
@@ -465,83 +1059,56 @@ def _build_executive_snapshot(
     )
     web_summary_short = _to_short_blurb(web_summary or web_link_summaries or "No external web summary available.")
 
-    prompt = f"""
-You are preparing an underwriting executive snapshot.
-
-Return ONLY valid JSON with these keys:
-- document_agent_summary
-- vanna_agent_summary
-- intranet_agent_summary
-- final_recommendation
-
-Rules:
-- Each *_summary must be 1-2 lines max.
-- final_recommendation must:
-  1) Start with exactly one decision: "WRITE" or "DO NOT WRITE".
-  2) Include concise reasoning from all four sources:
-     - Internal claim history (Vanna)
-     - External insight (SERP)
-     - Rules & Guidelines (Intranet)
-     - Broker submission (Document)
-  3) Be concise but specific (4-6 short lines).
-- Use only evidence provided below.
-- Do not use markdown.
-
-USER PROMPT:
-{user_prompt}
-
-DOCUMENT AGENT:
-{doc_insights}
-
-VANNA AGENT:
-SQL Query: {sql_query or "Not available"}
-Top rows:
-{sql_context}
-
-WEB AGENT:
-Summary:
-{web_summary}
-Top links:
-{links_context}
-
-INTRANET AGENT:
-{intranet_summary or "No intranet insights available."}
-"""
-
     vanna_short = f"SQL used: {sql_query or 'Not available'}."
+    decision_payload = decision_payload or {}
+    decision = str(decision_payload.get("decision") or "WRITE")
+    risk_score = decision_payload.get("risk_score")
+    confidence = decision_payload.get("confidence_score")
+    risks = decision_payload.get("key_risk_drivers") or []
+    positives = decision_payload.get("key_positive_factors") or []
+    conditions = decision_payload.get("conditions") or []
+    hard_rules = decision_payload.get("hard_rule_hits") or []
+
+    final_lines = [
+        f"Decision: {decision}",
+        f"Risk Score: {risk_score if risk_score is not None else 'N/A'} / 100",
+        f"Confidence: {confidence if confidence is not None else 'N/A'}%",
+        f"Key Risk Drivers: {', '.join(risks[:3]) if risks else 'Not identified'}",
+        f"Key Positive Factors: {', '.join(positives[:3]) if positives else 'Not identified'}",
+    ]
+    if hard_rules:
+        final_lines.append(f"Hard Rule Hits: {'; '.join(hard_rules[:2])}")
+    if conditions:
+        final_lines.append(f"Conditions: {'; '.join(conditions[:2])}")
+
     fallback = {
         "document_agent_summary": _to_short_blurb(doc_insights or "No document insight available."),
         "vanna_agent_summary": _to_short_blurb(vanna_short),
         "web_agent_summary": web_summary_short,
         "intranet_agent_summary": _to_short_blurb(intranet_summary or "No intranet policy insight available."),
-        "final_recommendation": _fallback_recommendation(
-            document_summary=doc_insights,
-            vanna_summary=vanna_short,
-            web_summary=web_summary_short,
-            intranet_summary=intranet_summary,
-        ),
+        "final_recommendation": "\n".join(final_lines),
+        "decision": decision,
+        "risk_score": str(risk_score if risk_score is not None else ""),
+        "confidence_score": str(confidence if confidence is not None else ""),
     }
 
-    try:
-        raw = call_llm(prompt)
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if not match:
-            return fallback
-        parsed = json.loads(match.group(0))
-        for k, v in fallback.items():
-            if not parsed.get(k):
-                parsed[k] = v
-        out = {k: str(parsed.get(k, fallback[k])).strip() for k in fallback}
-        # Force web-agent summary to come strictly from SERP output only.
-        out["web_agent_summary"] = web_summary_short
-        return out
-    except Exception:
-        return fallback
+    return fallback
 
 
 def _load_template_text(template_path: str) -> str:
-    doc = Document(template_path)
-    return "\n".join(p.text for p in doc.paragraphs if p.text)
+    ext = Path(template_path).suffix.lower()
+    if ext == ".docx":
+        doc = Document(template_path)
+        return "\n".join(p.text for p in doc.paragraphs if p.text)
+    if ext == ".pdf":
+        if PdfReader is None:
+            raise RuntimeError("PDF reader library not installed. Install `pypdf`.")
+        reader = PdfReader(template_path)
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+        if text.strip():
+            return text
+        raise ValueError(f"Template PDF has no extractable text: {template_path}")
+    raise ValueError(f"Unsupported template format: {template_path}")
 
 
 def _resolve_template_path(template_path: str | None) -> Path:
@@ -554,6 +1121,7 @@ def _resolve_template_path(template_path: str | None) -> Path:
         candidates.append(Path(env_template))
 
     candidates.append(Path(DEFAULT_EOI_TEMPLATE_PATH))
+    candidates.append(Path(PDF_EOI_TEMPLATE_PATH))
 
     resolved_candidates: list[Path] = []
     for candidate in candidates:
@@ -631,7 +1199,176 @@ TEMPLATE:
 {template_text}
 """
 
-    return call_llm(prompt).strip()
+    try:
+        filled = call_llm(prompt).strip()
+    except Exception:
+        filled = ""
+
+    # Fallback: keep deterministic minimum form body if LLM fill fails/returns empty.
+    if not filled:
+        lines = [
+            "Insurance Expression of Interest",
+            "",
+            "1. Applicant Information",
+        ]
+        for key, label in FIELD_LABELS.items():
+            value = str(broker_fields.get(key) or "Not Provided")
+            lines.append(f"{label}: {value}")
+        lines.extend(
+            [
+                "",
+                "2. Submission Context",
+                f"Prompt: {user_prompt or 'Not Provided'}",
+                f"Document Insights: {_to_short_blurb(doc_insights)}",
+            ]
+        )
+        filled = "\n".join(lines)
+
+    return filled
+
+
+def _replace_section_block(lines: list[str], heading_patterns: list[str], new_block: list[str]) -> list[str]:
+    start_idx = None
+    for i, ln in enumerate(lines):
+        low = ln.strip().lower()
+        if any(re.fullmatch(pat, low) for pat in heading_patterns):
+            start_idx = i
+            break
+
+    if start_idx is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        return lines + new_block
+
+    end_idx = len(lines)
+    for j in range(start_idx + 1, len(lines)):
+        candidate = lines[j].strip()
+        low = candidate.lower()
+        if re.match(r"^\d+\.\s", candidate):
+            end_idx = j
+            break
+        if low.startswith("disclaimer"):
+            end_idx = j
+            break
+        if low.startswith("authorized signature"):
+            end_idx = j
+            break
+
+    return lines[:start_idx] + new_block + lines[end_idx:]
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%d %b %Y")
+
+
+def _enforce_today_date(filled_text: str) -> str:
+    lines = filled_text.splitlines()
+    out = []
+    date_set = False
+
+    for line in lines:
+        if re.match(r"^\s*date\s*:", line, flags=re.IGNORECASE):
+            out.append(f"Date: {_today_str()}")
+            date_set = True
+        else:
+            out.append(line)
+
+    if not date_set:
+        inserted = False
+        for idx, ln in enumerate(out):
+            if re.match(r"^\s*1\.\s", ln):
+                out.insert(idx, f"Date: {_today_str()}")
+                out.insert(idx, "")
+                inserted = True
+                break
+        if not inserted:
+            out.append("")
+            out.append(f"Date: {_today_str()}")
+
+    return "\n".join(out)
+
+
+def _ensure_disclaimer_and_signature(filled_text: str) -> str:
+    lines = filled_text.splitlines()
+    low_all = "\n".join(lines).lower()
+
+    if "disclaimer:" not in low_all:
+        lines.extend(
+            [
+                "",
+                "Disclaimer: This document is generated from submitted and referenced data. Final underwriting decision remains subject to internal approval and policy terms.",
+            ]
+        )
+    if "authorized signature:" not in low_all:
+        lines.extend(
+            [
+                "",
+                "Authorized Signature: ____________________",
+                "Name: ____________________",
+                f"Date: {_today_str()}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _append_runtime_insights(filled_text: str, user_prompt: str, eoi_state: dict[str, Any]) -> str:
+    decision_payload = eoi_state.get("eoi_decision_payload") or {}
+    risk_profile = eoi_state.get("eoi_risk_profile") or {}
+    sql_result = eoi_state.get("sql_result")
+    sql_query = eoi_state.get("sql_query") or "Not Provided"
+
+    sql_snapshot = "Not available"
+    if isinstance(sql_result, pd.DataFrame) and not sql_result.empty:
+        if "Error" in sql_result.columns:
+            sql_snapshot = str(sql_result.iloc[0].get("Error") or "SQL error")
+        else:
+            row = sql_result.fillna("").iloc[0].to_dict()
+            parts = [f"{k}: {row[k]}" for k in list(row.keys())[:6] if str(row[k]).strip()]
+            sql_snapshot = "; ".join(parts) if parts else "No rows"
+
+    hard_rules = decision_payload.get("hard_rule_hits") or []
+    conditions = decision_payload.get("conditions") or []
+    risk_drivers = decision_payload.get("key_risk_drivers") or []
+    positives = decision_payload.get("key_positive_factors") or []
+
+    insight_lines = [
+        "AI-DERIVED RISK INSIGHTS",
+        f"User Prompt: {user_prompt or 'Not Provided'}",
+        f"Decision: {decision_payload.get('decision', eoi_state.get('eoi_decision', 'Not Provided'))}",
+        f"Risk Score: {decision_payload.get('risk_score', eoi_state.get('eoi_risk_score', 'Not Provided'))}",
+        f"Confidence Score: {decision_payload.get('confidence_score', eoi_state.get('eoi_confidence_score', 'Not Provided'))}",
+        "",
+        "Risk Profile JSON",
+        f"LOB: {risk_profile.get('lob', 'Not specified')}",
+        f"TIV: {risk_profile.get('tiv', 'Not specified')}",
+        f"Turnover: {risk_profile.get('turnover', 'Not specified')}",
+        f"Sites: {risk_profile.get('sites', 'Not specified')}",
+        "",
+        "Agent Evidence Summary",
+        f"Document Agent: {_to_short_blurb(eoi_state.get('eoi_doc_insights') or 'Not available.')}",
+        f"SQL Query: {sql_query}",
+        f"SQL Snapshot: {_to_short_blurb(sql_snapshot, max_sentences=3, max_chars=500)}",
+        f"Web Agent: {_to_short_blurb(eoi_state.get('general_summary') or 'Not available.', max_sentences=3, max_chars=500)}",
+        f"Intranet Agent: {_to_short_blurb(eoi_state.get('intranet_summary') or 'Not available.', max_sentences=3, max_chars=500)}",
+        "",
+        "Decision Drivers",
+        f"Key Positive Factors: {', '.join(positives) if positives else 'Not identified'}",
+        f"Key Risk Drivers: {', '.join(risk_drivers) if risk_drivers else 'Not identified'}",
+        f"Hard Rule Hits: {'; '.join(hard_rules) if hard_rules else 'None'}",
+        f"Conditions: {'; '.join(conditions) if conditions else 'None'}",
+    ]
+    lines = filled_text.splitlines()
+    replaced = _replace_section_block(
+        lines,
+        heading_patterns=[
+            r"ai-derived risk insights",
+            r"\d+\.\s*ai-derived risk insights",
+            r"ai underwriting insights",
+            r"\d+\.\s*ai underwriting insights",
+        ],
+        new_block=insight_lines,
+    )
+    return "\n".join(replaced)
 
 
 def _override_field_line(line: str, label: str, value: str) -> str:
@@ -893,8 +1630,401 @@ def _build_styled_eoi_doc(filled_text: str, eoi_state: dict[str, Any] | None = N
     return buffer.getvalue()
 
 
+def _iter_all_paragraphs(doc: Document):
+    for p in doc.paragraphs:
+        yield p
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    yield p
+
+
+def _set_paragraph_text_preserve_format(p, text: str, force_bold: bool | None = None) -> None:
+    if not p.runs:
+        run = p.add_run("")
+        if force_bold is not None:
+            run.bold = force_bold
+    p.runs[0].text = text
+    if force_bold is not None:
+        p.runs[0].bold = force_bold
+    for r in p.runs[1:]:
+        r.text = ""
+
+
+def _replace_prefixed_line(doc: Document, prefix: str, value: str) -> bool:
+    low_prefix = prefix.lower()
+    for p in _iter_all_paragraphs(doc):
+        txt = (p.text or "").strip()
+        if txt.lower().startswith(low_prefix):
+            _set_paragraph_text_preserve_format(p, f"{prefix}{value}")
+            return True
+    return False
+
+
+def _replace_heading_block(doc: Document, heading: str, lines: list[str]) -> None:
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+    def _heading_text(base_heading: str) -> str:
+        clean = re.sub(r"^\d+\.\s*", "", base_heading.strip())
+        mapping = {
+            "proposaloverview": "1. PROPOSAL OVERVIEW",
+            "indicativeterms": "2. INDICATIVE TERMS",
+            "aiderivedriskinsights": "3. AI-DERIVED RISK INSIGHTS",
+            "specificconditionssubjectivities": "4. SPECIFIC CONDITIONS & SUBJECTIVITIES",
+            "nextsteps": "5. NEXT STEPS",
+            "disclaimer": "6. Disclaimer",
+            "authorizedsignature": "7. Authorized Signature",
+        }
+        return mapping.get(_norm(clean), clean)
+
+    def _set_heading_para(p, text: str) -> None:
+        _set_paragraph_text_preserve_format(p, text, force_bold=True)
+
+    paras = list(_iter_all_paragraphs(doc))
+    start = None
+    target_norm = _norm(heading)
+    for i, p in enumerate(paras):
+        candidate_norm = _norm((p.text or "").strip())
+        if candidate_norm and (target_norm in candidate_norm or candidate_norm in target_norm):
+            start = i
+            break
+    if start is None:
+        anchor = None
+        for p in paras:
+            n = _norm((p.text or "").strip())
+            if n in {"disclaimer", "authorizedsignature"}:
+                anchor = p
+                break
+        if anchor is None:
+            doc.add_paragraph("")
+            h = doc.add_paragraph("")
+            _set_heading_para(h, _heading_text(heading))
+            for line in lines:
+                np = doc.add_paragraph("")
+                _set_paragraph_text_preserve_format(np, line, force_bold=False)
+        else:
+            h = anchor.insert_paragraph_before("")
+            h.style = anchor.style
+            _set_heading_para(h, _heading_text(heading))
+            for line in reversed(lines):
+                np = anchor.insert_paragraph_before("")
+                np.style = anchor.style
+                _set_paragraph_text_preserve_format(np, line, force_bold=False)
+        return
+
+    end = len(paras)
+    for j in range(start + 1, len(paras)):
+        t_norm = _norm((paras[j].text or "").strip())
+        if t_norm in {
+            "proposaloverview",
+            "indicativeterms",
+            "aiderivedriskinsights",
+            "specificconditionssubjectivities",
+            "nextsteps",
+            "disclaimer",
+            "authorizedsignature",
+        }:
+            end = j
+            break
+
+    _set_heading_para(paras[start], _heading_text(heading))
+    write_index = start + 1
+    for line in lines:
+        if write_index < end:
+            _set_paragraph_text_preserve_format(paras[write_index], line, force_bold=False)
+            write_index += 1
+        else:
+            np = paras[end - 1].insert_paragraph_before("")
+            np.style = paras[end - 1].style
+            _set_paragraph_text_preserve_format(np, line, force_bold=False)
+
+    while write_index < end:
+        _set_paragraph_text_preserve_format(paras[write_index], "", force_bold=False)
+        write_index += 1
+
+
+def _sql_dataframe_to_table_lines(df: pd.DataFrame, max_rows: int = 5) -> list[str]:
+    if not isinstance(df, pd.DataFrame) or df.empty or "Error" in df.columns:
+        return ["| Status |", "| --- |", "| No structured SQL output available. |"]
+
+    view = df.head(max_rows).fillna("").copy()
+    cols = [str(c) for c in view.columns]
+    lines = []
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("| " + " | ".join(["---"] * len(cols)) + " |")
+    for _, row in view.iterrows():
+        vals = [str(row[c]).replace("\n", " ").strip() for c in view.columns]
+        lines.append("| " + " | ".join(vals) + " |")
+    return lines
+
+
+def _sql_dataframe_for_doc_table(df: pd.DataFrame | None, max_rows: int = 5) -> tuple[list[str], list[list[str]]]:
+    if not isinstance(df, pd.DataFrame) or df.empty or "Error" in df.columns:
+        return ["Status"], [["No structured SQL output available."]]
+
+    excluded = {"lob_hint", "source_db"}
+    keep_cols = [c for c in df.columns if str(c).strip().lower() not in excluded]
+    view = df[keep_cols].head(max_rows).fillna("").copy() if keep_cols else pd.DataFrame()
+    if view.empty:
+        return ["Status"], [["No structured SQL output available."]]
+    headers = [str(c) for c in view.columns]
+    rows: list[list[str]] = []
+    for _, row in view.iterrows():
+        rows.append([str(row[c]).replace("\n", " ").strip() for c in view.columns])
+    return headers, rows
+
+
+def _insert_table_after_paragraph(doc: Document, paragraph, headers: list[str], rows: list[list[str]]) -> None:
+    col_count = max(1, len(headers))
+    table = doc.add_table(rows=1 + max(1, len(rows)), cols=col_count)
+    # Some templates don't include "Table Grid"; fall back gracefully.
+    style_candidates = ["Table Grid", "Light Grid", "Normal Table"]
+    for style_name in style_candidates:
+        try:
+            table.style = style_name
+            break
+        except Exception:
+            continue
+
+    for idx, h in enumerate(headers):
+        table.cell(0, idx).text = str(h)
+        for p in table.cell(0, idx).paragraphs:
+            for r in p.runs:
+                r.bold = True
+
+    if rows:
+        for r_idx, row in enumerate(rows, start=1):
+            for c_idx in range(col_count):
+                val = row[c_idx] if c_idx < len(row) else ""
+                table.cell(r_idx, c_idx).text = str(val)
+    else:
+        table.cell(1, 0).text = "No structured SQL output available."
+
+    # Apply full borders to all cells.
+    for row in table.rows:
+        for cell in row.cells:
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+            tcBorders = tcPr.find(qn("w:tcBorders"))
+            if tcBorders is None:
+                tcBorders = OxmlElement("w:tcBorders")
+                tcPr.append(tcBorders)
+            for edge in ("top", "left", "bottom", "right"):
+                tag = qn(f"w:{edge}")
+                element = tcBorders.find(tag)
+                if element is None:
+                    element = OxmlElement(f"w:{edge}")
+                    tcBorders.append(element)
+                element.set(qn("w:val"), "single")
+                element.set(qn("w:sz"), "8")
+                element.set(qn("w:space"), "0")
+                element.set(qn("w:color"), "000000")
+
+    paragraph._p.addnext(table._tbl)
+
+
+def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
+    from docx.oxml import OxmlElement
+    from docx.text.paragraph import Paragraph
+
+    def _insert_paragraph_after(paragraph, text: str, bold: bool = False):
+        new_p = OxmlElement("w:p")
+        paragraph._p.addnext(new_p)
+        para = Paragraph(new_p, paragraph._parent)
+        _set_paragraph_text_preserve_format(para, text, force_bold=bold)
+        return para
+
+    paras = list(_iter_all_paragraphs(doc))
+    for p in paras:
+        txt = (p.text or "").strip()
+        low = txt.lower()
+        if low.startswith("6. disclaimer"):
+            prev_blank = p.insert_paragraph_before("")
+            _set_paragraph_text_preserve_format(prev_blank, "", force_bold=False)
+            if not p.runs:
+                p.add_run(p.text)
+            for r in p.runs:
+                r.bold = True
+            return
+        if low.startswith("disclaimer:"):
+            body = txt.split(":", 1)[1].strip() if ":" in txt else ""
+            space_para = p.insert_paragraph_before("")
+            _set_paragraph_text_preserve_format(space_para, "", force_bold=False)
+            _set_paragraph_text_preserve_format(p, "6. Disclaimer", force_bold=True)
+            _insert_paragraph_after(
+                p,
+                body or "This document is an Expression of Interest only and does not constitute a contract of insurance.",
+                bold=False,
+            )
+            return
+
+    # Missing disclaimer: append with spacing and bold heading.
+    doc.add_paragraph("")
+    h = doc.add_paragraph("")
+    _set_paragraph_text_preserve_format(h, "6. Disclaimer", force_bold=True)
+    doc.add_paragraph("This document is an Expression of Interest only and does not constitute a contract of insurance.")
+
+
+def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_state: dict[str, Any], decision_payload: dict[str, Any]) -> bytes:
+    doc = Document(str(template_path))
+
+    broker_fields = dict(eoi_state.get("eoi_broker_fields") or {})
+    risk_profile = eoi_state.get("eoi_risk_profile") or {}
+    web_risk = eoi_state.get("eoi_web_risk") or {}
+    geo_web_summary = eoi_state.get("eoi_geo_web_summary") or ""
+    conditions = decision_payload.get("conditions") or []
+    hard_rules = decision_payload.get("hard_rule_hits") or []
+    sql_result = eoi_state.get("sql_result")
+
+    insured_name = broker_fields.get("registered_address") or "Prospective Insured"
+    lob = risk_profile.get("lob") or "Not specified"
+    proposed_limit = broker_fields.get("expected_sum_insured") or "Not Provided"
+    proposed_retention = "To be finalized as per underwriting review."
+    territory = risk_profile.get("sites") or "As per submission"
+
+    _replace_prefixed_line(doc, "Date: ", _today_str())
+    _replace_prefixed_line(doc, "Subject: ", f"{user_prompt or 'Insurance Program Submission'}")
+    _replace_prefixed_line(doc, "Insured: ", str(insured_name))
+    _replace_prefixed_line(doc, "Line of Business: ", str(lob))
+    _replace_prefixed_line(doc, "Proposed Limit: ", str(proposed_limit))
+    _replace_prefixed_line(doc, "Proposed Retention: ", proposed_retention)
+    _replace_prefixed_line(doc, "Territory: ", str(territory))
+
+    sql_headers, sql_rows = _sql_dataframe_for_doc_table(sql_result, max_rows=5)
+
+    doc_agent_full = str(eoi_state.get("eoi_doc_insights") or "Not available.").strip()
+    if len(doc_agent_full) > 1800:
+        doc_agent_full = doc_agent_full[:1800].rstrip() + "..."
+
+    geo_tokens = web_risk.get("geo_tokens") or []
+    detected = web_risk.get("detected_hazards") or {}
+    detected_labels = [k.title() for k, v in detected.items() if v]
+    if not detected_labels:
+        detected_labels = ["None flagged"]
+
+    ai_lines = [
+        f"Our underwriting engine has assigned Risk Score {decision_payload.get('risk_score', 'N/A')} with decision {decision_payload.get('decision', 'N/A')}.",
+        f"Confidence Score: {decision_payload.get('confidence_score', 'N/A')}.",
+        f"Document Agent Summary: {doc_agent_full}",
+        f"Geography Risk Score (Web Agent): {web_risk.get('score', 'N/A')} ({web_risk.get('level', 'N/A')}).",
+        f"Geographies Analyzed: {', '.join(geo_tokens) if geo_tokens else 'Not specified'}.",
+        f"Geography Hazard Flags: {', '.join(detected_labels)}.",
+        f"Geo Risk SERP Summary: {_to_short_blurb(geo_web_summary or 'Not available.', max_sentences=3, max_chars=500)}",
+        "SQL Agent Output (Top Rows):",
+    ]
+    ai_lines.extend([
+        f"Web Agent: {_to_short_blurb(eoi_state.get('general_summary') or 'Not available.', max_sentences=2, max_chars=300)}",
+        f"Intranet Agent: {_to_short_blurb(eoi_state.get('intranet_summary') or 'Not available.', max_sentences=2, max_chars=300)}",
+    ])
+    if hard_rules:
+        ai_lines.append(f"Hard Rule Hits: {'; '.join(hard_rules)}.")
+    _replace_heading_block(doc, "AI-DERIVED RISK INSIGHTS", ai_lines)
+
+    # Strictly render SQL output as a Word table (header row + data rows)
+    sql_anchor = None
+    for p in _iter_all_paragraphs(doc):
+        if (p.text or "").strip().lower().startswith("sql agent output (top rows):"):
+            sql_anchor = p
+            break
+    if sql_anchor is not None:
+        _insert_table_after_paragraph(doc, sql_anchor, sql_headers, sql_rows)
+
+    conditions_block = conditions[:5] if conditions else ["No additional subjectivities triggered by hard rules."]
+    _replace_heading_block(doc, "SPECIFIC CONDITIONS & SUBJECTIVITIES", conditions_block)
+
+    text_blob = "\n".join((p.text or "") for p in _iter_all_paragraphs(doc)).lower()
+    _ensure_disclaimer_heading_spacing(doc)
+    if "authorized signature:" not in text_blob:
+        doc.add_paragraph("Authorized Signature: ____________________")
+        doc.add_paragraph("Name: ____________________")
+        doc.add_paragraph(f"Date: {_today_str()}")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _append_conditions_section(filled_text: str, conditions: list[str]) -> str:
+    if not conditions:
+        return filled_text
+    section = ["", "7. Underwriting Conditions"]
+    for idx, cond in enumerate(conditions, 1):
+        section.append(f"{idx}. {cond}")
+    return filled_text + "\n" + "\n".join(section)
+
+
+def _build_underwriting_memo_doc(user_prompt: str, eoi_state: dict[str, Any], decision_payload: dict[str, Any]) -> bytes:
+    doc = Document()
+    _apply_doc_theme(doc)
+    _add_line_with_style(doc, "Underwriting Memo - Human Review Required")
+    _add_line_with_style(doc, f"Decision: {decision_payload.get('decision', 'REFER')}")
+    _add_line_with_style(doc, f"Risk Score: {decision_payload.get('risk_score', 'N/A')}")
+    _add_line_with_style(doc, f"Confidence Score: {decision_payload.get('confidence_score', 'N/A')}")
+    _add_line_with_style(doc, f"User Prompt: {user_prompt}")
+    _add_line_with_style(doc, "")
+    _add_line_with_style(doc, "Key Risk Drivers:")
+    for item in decision_payload.get("key_risk_drivers", []):
+        _add_line_with_style(doc, f"- {item}")
+    _add_line_with_style(doc, "")
+    _add_line_with_style(doc, "Conditions / Referral Notes:")
+    for item in decision_payload.get("conditions", []) or ["Senior underwriting authority review required before bind."]:
+        _add_line_with_style(doc, f"- {item}")
+    _add_line_with_style(doc, "")
+    _add_line_with_style(doc, "Source Summary:")
+    _add_line_with_style(doc, f"Document: {eoi_state.get('eoi_doc_insights', 'Not available')}")
+    _add_line_with_style(doc, f"Web: {eoi_state.get('general_summary', 'Not available')}")
+    _add_line_with_style(doc, f"Intranet: {eoi_state.get('intranet_summary', 'Not available')}")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _build_decline_letter_doc(eoi_state: dict[str, Any], decision_payload: dict[str, Any]) -> bytes:
+    doc = Document()
+    _apply_doc_theme(doc)
+    _add_line_with_style(doc, "Decline Letter")
+    _add_line_with_style(doc, "")
+    _add_line_with_style(
+        doc,
+        "Thank you for your submission. After review of internal guidelines, portfolio indicators, and external risk intelligence, we are unable to offer terms at this time.",
+    )
+    _add_line_with_style(doc, "")
+    _add_line_with_style(doc, f"Decision: {decision_payload.get('decision', 'DECLINE')}")
+    _add_line_with_style(doc, f"Risk Score: {decision_payload.get('risk_score', 'N/A')}")
+    _add_line_with_style(doc, f"Confidence Score: {decision_payload.get('confidence_score', 'N/A')}")
+    _add_line_with_style(doc, "Primary Reasons:")
+    reasons = decision_payload.get("hard_rule_hits") or decision_payload.get("key_risk_drivers") or ["Risk profile outside underwriting appetite."]
+    for r in reasons[:4]:
+        _add_line_with_style(doc, f"- {r}")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def generate_eoi_document(user_prompt: str, eoi_state: dict[str, Any], template_path: str | None = None) -> tuple[bytes, str]:
+    decision_payload = eoi_state.get("eoi_decision_payload") or {}
+    decision = str(decision_payload.get("decision") or "WRITE")
+
+    if decision == "DECLINE":
+        return _build_decline_letter_doc(eoi_state, decision_payload), "Decline_Letter.docx"
+    if decision == "REFER":
+        return _build_underwriting_memo_doc(user_prompt, eoi_state, decision_payload), "Underwriting_Memo_Refer.docx"
+
     path = _resolve_template_path(template_path)
+
+    if path.suffix.lower() == ".docx":
+        file_name = "Generated_Insurance_EOI.docx"
+        if decision == "WRITE_WITH_CONDITIONS":
+            file_name = "Conditional_Insurance_EOI.docx"
+        doc_bytes = _build_template_based_eoi_doc(path, user_prompt, eoi_state, decision_payload)
+        return doc_bytes, file_name
 
     template_text = _load_template_text(str(path))
     filled_text = _build_filled_form_text(user_prompt, eoi_state, template_text)
@@ -906,84 +2036,191 @@ def generate_eoi_document(user_prompt: str, eoi_state: dict[str, Any], template_
 
     filled_text = _enforce_extracted_fields(filled_text, broker_fields)
     filled_text = _enforce_declaration_and_claims(filled_text)
+    filled_text = _enforce_today_date(filled_text)
+    filled_text = _append_runtime_insights(filled_text, user_prompt, eoi_state)
+    filled_text = _ensure_disclaimer_and_signature(filled_text)
 
     selected_entity = _infer_entity_type(user_prompt, eoi_state)
     filled_text = _enforce_type_entity_checkboxes(filled_text, selected_entity)
     filled_text = _normalize_checkbox_lines(filled_text)
+    if decision == "WRITE_WITH_CONDITIONS":
+        filled_text = _append_conditions_section(filled_text, decision_payload.get("conditions") or [])
 
     doc_bytes = _build_styled_eoi_doc(filled_text, eoi_state=eoi_state)
 
-    return doc_bytes, "Generated_Insurance_EOI.docx"
+    file_name = "Generated_Insurance_EOI.docx"
+    if decision == "WRITE_WITH_CONDITIONS":
+        file_name = "Conditional_Insurance_EOI.docx"
+    return doc_bytes, file_name
+
+
+def _empty_eoi_state(user_prompt: str = "", message: str = "EOI analysis unavailable.") -> GraphState:
+    return {
+        "route": "eoi",
+        "vanna_prompt": build_vanna_prompt(user_prompt or ""),
+        "serp_prompt": build_serp_prompt(user_prompt or ""),
+        "eoi_risk_profile": {"lob": "Not specified", "tiv": "Not specified", "turnover": "Not specified", "sites": "Not specified"},
+        "eoi_doc_insights": message,
+        "eoi_web_risk": {"score": 50.0, "level": "MODERATE", "drivers": ["Web risk analysis unavailable."]},
+        "eoi_geo_web_summary": "",
+        "eoi_geo_web_links": [],
+        "eoi_geo_web_prompt": "",
+        "eoi_broker_fields": {},
+        "sql_result": pd.DataFrame([{"Error": message}]),
+        "sql_query": None,
+        "web_links": [],
+        "general_summary": "",
+        "intranet_summary": "",
+        "intranet_sources": [],
+        "intranet_doc_links": [],
+        "intranet_doc_count": 0,
+        "intranet_lob": None,
+        "eoi_decision": "REFER",
+        "eoi_risk_score": 70.0,
+        "eoi_confidence_score": 35.0,
+        "eoi_hard_rule_hits": [],
+        "eoi_conditions": ["Manual underwriter review required due to incomplete analysis signal."],
+        "eoi_metric_scores": {},
+        "eoi_weighted_contributions": {},
+        "eoi_decision_payload": {
+            "decision": "REFER",
+            "decision_document_type": "UNDERWRITING_MEMO",
+            "risk_score": 70.0,
+            "confidence_score": 35.0,
+            "web_risk_score": 50.0,
+            "hard_rule_triggered": False,
+            "hard_rule_hits": [],
+            "key_positive_factors": [],
+            "key_risk_drivers": ["Insufficient machine-readable input for full scoring."],
+            "conditions": ["Manual underwriter review required due to incomplete analysis signal."],
+            "metric_scores": {},
+            "weighted_contributions": {},
+            "normalization_layer": {},
+        },
+        "eoi_executive_snapshot": {
+            "document_agent_summary": message,
+            "vanna_agent_summary": "SQL benchmark unavailable.",
+            "web_agent_summary": "Web benchmark unavailable.",
+            "intranet_agent_summary": "Intranet benchmark unavailable.",
+            "final_recommendation": "Decision: REFER\nRisk Score: 70 / 100\nConfidence: 35%",
+            "decision": "REFER",
+            "risk_score": "70",
+            "confidence_score": "35",
+        },
+    }
 
 
 def EOI_node(state: GraphState) -> GraphState:
     user_prompt = (state.get("user_prompt") or "").strip()
     if not user_prompt:
-        return {
-            "eoi_doc_insights": "Please enter a prompt.",
-            "sql_result": None,
-            "sql_query": None,
-            "web_links": [],
-            "general_summary": "",
-            "eoi_broker_fields": {},
-        }
+        return _empty_eoi_state(user_prompt, "Please enter a prompt.")
 
-    uploaded_file_path = state.get("uploaded_file1_path") or state.get("uploaded_file_path")
-
-    broker_text = ""
-    if uploaded_file_path and os.path.exists(uploaded_file_path):
-        try:
-            broker_text = _extract_doc_text(uploaded_file_path)
-        except Exception:
-            broker_text = ""
-
-    eoi_broker_fields = extract_broker_fields(broker_text) if broker_text else {}
-
-    doc_insights = "No document uploaded."
     try:
+        uploaded_file_path = state.get("uploaded_file1_path") or state.get("uploaded_file_path")
+
+        broker_text = ""
         if uploaded_file_path and os.path.exists(uploaded_file_path):
-            ext = Path(uploaded_file_path).suffix.lower()
-            doc_out = document_node(
-                {
-                    "user_prompt": user_prompt,
-                    "uploaded_file1_path": uploaded_file_path,
-                    "uploaded_file1_is_excel": ext in {".xlsx", ".xls", ".csv"},
-                    "uploaded_file1_is_docx": ext == ".docx",
-                }
-            )
-            doc_insights = doc_out.get("general_summary") or summarize_doc_with_instruction(uploaded_file_path, user_prompt)
-    except Exception:
-        doc_insights = summarize_doc_with_instruction(uploaded_file_path, user_prompt)
+            try:
+                broker_text = _extract_doc_text(uploaded_file_path)
+            except Exception as exc:
+                broker_text = ""
+                state["eoi_doc_parse_error"] = str(exc)
 
-    vanna_prompt = build_vanna_prompt(user_prompt)
-    serp_prompt = build_serp_prompt(user_prompt)
-    sql_query, sql_result = _run_internal_sql(vanna_prompt)
-    search_result = _run_external_search(serp_prompt)
-    intranet_result = _run_intranet_insights(user_prompt, doc_insights, broker_text)
-    executive_snapshot = _build_executive_snapshot(
-        user_prompt=user_prompt,
-        doc_insights=doc_insights,
-        sql_query=sql_query,
-        sql_result=sql_result,
-        web_summary=search_result["general_summary"],
-        web_links=search_result["web_links"],
-        intranet_summary=intranet_result["intranet_summary"],
-    )
+        eoi_broker_fields = extract_broker_fields(broker_text) if broker_text else {}
+        risk_profile = _extract_risk_profile_json(user_prompt, broker_text, eoi_broker_fields)
 
-    return {
-        "route": "eoi",
-        "vanna_prompt": vanna_prompt,
-        "serp_prompt": serp_prompt,
-        "eoi_doc_insights": doc_insights,
-        "eoi_broker_fields": eoi_broker_fields,
-        "sql_result": sql_result,
-        "sql_query": sql_query,
-        "web_links": search_result["web_links"],
-        "general_summary": search_result["general_summary"],
-        "intranet_summary": intranet_result["intranet_summary"],
-        "intranet_sources": intranet_result["intranet_sources"],
-        "intranet_doc_links": intranet_result["intranet_doc_links"],
-        "intranet_doc_count": intranet_result["intranet_doc_count"],
-        "intranet_lob": intranet_result["intranet_lob"],
-        "eoi_executive_snapshot": executive_snapshot,
-    }
+        doc_insights = "No document uploaded."
+        try:
+            if uploaded_file_path and os.path.exists(uploaded_file_path):
+                ext = Path(uploaded_file_path).suffix.lower()
+                doc_out = document_node(
+                    {
+                        "user_prompt": user_prompt,
+                        "uploaded_file1_path": uploaded_file_path,
+                        "uploaded_file1_is_excel": ext in {".xlsx", ".xls", ".csv"},
+                        "uploaded_file1_is_docx": ext == ".docx",
+                    }
+                )
+                doc_insights = doc_out.get("general_summary") or summarize_doc_with_instruction(uploaded_file_path, user_prompt)
+        except Exception:
+            doc_insights = summarize_doc_with_instruction(uploaded_file_path, user_prompt)
+
+        vanna_prompt = build_vanna_prompt(user_prompt)
+        serp_prompt = build_serp_prompt(user_prompt)
+        sql_query, sql_result = _run_internal_sql(
+            vanna_prompt,
+            user_prompt=user_prompt,
+            broker_fields=eoi_broker_fields,
+            broker_text=broker_text,
+        )
+        search_result = _run_external_search(serp_prompt)
+        geo_search_result = _run_geo_risk_search(
+            user_prompt=user_prompt,
+            risk_profile=risk_profile,
+            broker_fields=eoi_broker_fields,
+        )
+        intranet_result = _run_intranet_insights(user_prompt, doc_insights, broker_text)
+        web_risk = _compute_web_geo_risk(
+            user_prompt=user_prompt,
+            web_summary=geo_search_result["general_summary"],
+            web_links=geo_search_result.get("web_links"),
+            risk_profile=risk_profile,
+            broker_fields=eoi_broker_fields,
+        )
+        decision_payload = _compute_risk_decision(
+            user_prompt=user_prompt,
+            broker_text=broker_text,
+            broker_fields=eoi_broker_fields,
+            risk_profile=risk_profile,
+            sql_result=sql_result,
+            web_summary=search_result["general_summary"],
+            web_risk=web_risk,
+            intranet_summary=intranet_result["intranet_summary"],
+            doc_insights=doc_insights,
+        )
+        executive_snapshot = _build_executive_snapshot(
+            user_prompt=user_prompt,
+            doc_insights=doc_insights,
+            sql_query=sql_query,
+            sql_result=sql_result,
+            web_summary=search_result["general_summary"],
+            web_links=search_result["web_links"],
+            intranet_summary=intranet_result["intranet_summary"],
+            decision_payload=decision_payload,
+        )
+
+        return {
+            "route": "eoi",
+            "vanna_prompt": vanna_prompt,
+            "serp_prompt": serp_prompt,
+            "eoi_risk_profile": risk_profile,
+            "eoi_web_risk": web_risk,
+            "eoi_geo_web_summary": geo_search_result.get("general_summary"),
+            "eoi_geo_web_links": geo_search_result.get("web_links"),
+            "eoi_geo_web_prompt": geo_search_result.get("geo_prompt"),
+            "eoi_doc_insights": doc_insights,
+            "eoi_broker_fields": eoi_broker_fields,
+            "sql_result": sql_result,
+            "sql_query": sql_query,
+            "web_links": search_result["web_links"],
+            "general_summary": search_result["general_summary"],
+            "intranet_summary": intranet_result["intranet_summary"],
+            "intranet_sources": intranet_result["intranet_sources"],
+            "intranet_doc_links": intranet_result["intranet_doc_links"],
+            "intranet_doc_count": intranet_result["intranet_doc_count"],
+            "intranet_lob": intranet_result["intranet_lob"],
+            "eoi_decision": decision_payload.get("decision"),
+            "eoi_risk_score": decision_payload.get("risk_score"),
+            "eoi_confidence_score": decision_payload.get("confidence_score"),
+            "eoi_hard_rule_hits": decision_payload.get("hard_rule_hits"),
+            "eoi_conditions": decision_payload.get("conditions"),
+            "eoi_metric_scores": decision_payload.get("metric_scores"),
+            "eoi_weighted_contributions": decision_payload.get("weighted_contributions"),
+            "eoi_normalization_layer": decision_payload.get("normalization_layer"),
+            "eoi_hard_rule_triggered": decision_payload.get("hard_rule_triggered"),
+            "eoi_decision_document_type": decision_payload.get("decision_document_type"),
+            "eoi_decision_payload": decision_payload,
+            "eoi_executive_snapshot": executive_snapshot,
+        }
+    except Exception as exc:
+        return _empty_eoi_state(user_prompt, f"EOI analysis fallback triggered: {exc}")

@@ -50,7 +50,7 @@ google-auth-httplib2
 google-api-python-client
 
 pypdf
-
+ipykernel
 
 # === Virtual Env Notes ===
 # python -m venv venv

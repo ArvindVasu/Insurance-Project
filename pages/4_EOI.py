@@ -33,10 +33,31 @@ if "eoi_show_download_dialog" not in st.session_state:
 
 
 
+def _decision_to_button_label(decision: str | None) -> str:
+    mapping = {
+        "WRITE": "Generate Final Document (EOI)",
+        "WRITE_WITH_CONDITIONS": "Generate Final Document (Conditional EOI)",
+        "REFER": "Generate Final Document (Underwriting Memo)",
+        "DECLINE": "Generate Final Document (Decline Letter)",
+    }
+    return mapping.get(str(decision or "").upper(), "Generate Final Document")
+
+
+def _generate_final_document() -> None:
+    with st.spinner("Preparing final document from decision engine..."):
+        doc_bytes, file_name = generate_eoi_document(
+            user_prompt=st.session_state.eoi_last_prompt,
+            eoi_state=st.session_state.eoi_last_output,
+        )
+        st.session_state.eoi_generated_doc = doc_bytes
+        st.session_state.eoi_generated_name = file_name
+        st.session_state.eoi_show_download_dialog = True
+
+
 def _show_download_dialog() -> None:
-    st.write("EOI generation completed. Download your document below.")
+    st.write("Final document generated from decision engine. Download below.")
     downloaded = st.download_button(
-        "Download EOI Document",
+        "Download Final Document",
         data=st.session_state.eoi_generated_doc,
         file_name=st.session_state.eoi_generated_name,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -121,7 +142,12 @@ btn_col1, btn_col2 = st.columns(2)
 with btn_col1:
     run_clicked = st.button("Run EOI Analysis", use_container_width=True, type="primary")
 with btn_col2:
-    generate_clicked = st.button("Generate EOI", use_container_width=True, type="secondary")
+    last_decision = (st.session_state.eoi_last_output or {}).get("eoi_decision")
+    generate_clicked = st.button(
+        _decision_to_button_label(last_decision),
+        use_container_width=True,
+        type="secondary",
+    )
 
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -152,38 +178,52 @@ if run_clicked:
     st.session_state.eoi_last_output = output
     st.session_state.eoi_last_prompt = user_prompt
     st.session_state.eoi_generated_doc = None
+    st.session_state.eoi_generated_name = "Generated_Insurance_EOI.docx"
+    if str(output.get("eoi_decision") or "").upper() == "WRITE":
+        try:
+            _generate_final_document()
+        except Exception as exc:
+            st.error(f"Failed to auto-generate EOI document: {exc}")
     # Refresh immediately so "Generate EOI" picks up green styling as soon as analysis is done.
     st.rerun()
 
 if generate_clicked:
     if not st.session_state.eoi_last_output:
-        st.error("Run EOI Analysis first. Generate EOI uses the latest generated insights.")
+        st.error("Run EOI Analysis first. Final document generation uses the latest decision output.")
     else:
-        with st.spinner("Filling EOI template and preparing download..."):
-            try:
-                doc_bytes, file_name = generate_eoi_document(
-                    user_prompt=st.session_state.eoi_last_prompt,
-                    eoi_state=st.session_state.eoi_last_output,
-                )
-                st.session_state.eoi_generated_doc = doc_bytes
-                st.session_state.eoi_generated_name = file_name
-                st.session_state.eoi_show_download_dialog = True
-            except Exception as exc:
-                st.error(f"Failed to generate EOI document: {exc}")
+        try:
+            _generate_final_document()
+        except Exception as exc:
+            st.error(f"Failed to generate final document: {exc}")
 
 last_output = st.session_state.eoi_last_output
 if last_output:
     snapshot = last_output.get("eoi_executive_snapshot") or {}
+    risk_profile = last_output.get("eoi_risk_profile") or {}
+    metric_scores = last_output.get("eoi_metric_scores") or {}
+    weighted = last_output.get("eoi_weighted_contributions") or {}
+    hard_rules = last_output.get("eoi_hard_rule_hits") or []
+    hard_rule_triggered = bool(last_output.get("eoi_hard_rule_triggered"))
+    web_risk = last_output.get("eoi_web_risk") or {}
+    geo_web_summary = last_output.get("eoi_geo_web_summary") or ""
+    geo_web_links = last_output.get("eoi_geo_web_links") or []
+    geo_web_prompt = last_output.get("eoi_geo_web_prompt") or ""
     if snapshot:
         doc_txt = html.escape(str(snapshot.get("document_agent_summary", "Not available")))
         vanna_txt = html.escape(str(snapshot.get("vanna_agent_summary", "Not available")))
         web_txt = html.escape(str(snapshot.get("web_agent_summary", "Not available")))
         intranet_txt = html.escape(str(snapshot.get("intranet_agent_summary", "Not available")))
         rec_txt = html.escape(str(snapshot.get("final_recommendation", "Not available"))).replace("\n", "<br>")
+        decision_txt = html.escape(str(last_output.get("eoi_decision") or snapshot.get("decision") or "Not available"))
+        risk_txt = html.escape(str(last_output.get("eoi_risk_score") or snapshot.get("risk_score") or "Not available"))
+        conf_txt = html.escape(str(last_output.get("eoi_confidence_score") or snapshot.get("confidence_score") or "Not available"))
 
         snapshot_html = f"""
 <div class="eoi-exec-box">
   <div class="eoi-exec-title">Executive Snapshot</div>
+  <p><strong>Decision:</strong> {decision_txt}</p>
+  <p><strong>Risk Score:</strong> {risk_txt}</p>
+  <p><strong>Confidence Score:</strong> {conf_txt}</p>
   <p><strong>Document Agent:</strong> {doc_txt}</p>
   <p><strong>Vanna Agent:</strong> {vanna_txt}</p>
   <p><strong>Web Agent:</strong> {web_txt}</p>
@@ -193,6 +233,73 @@ if last_output:
 """
         st.markdown(snapshot_html, unsafe_allow_html=True)
 
+    st.markdown("### Risk Profile JSON")
+    st.json(
+        {
+            "lob": risk_profile.get("lob", "Not specified"),
+            "tiv": risk_profile.get("tiv", "Not specified"),
+            "turnover": risk_profile.get("turnover", "Not specified"),
+            "sites": risk_profile.get("sites", "Not specified"),
+        }
+    )
+
+    st.markdown("### Decision Engine")
+    st.write(f"Hard Rule Triggered: {'Yes' if hard_rule_triggered else 'No'}")
+    if hard_rules:
+        for idx, hr in enumerate(hard_rules, 1):
+            st.markdown(f"{idx}. {hr}")
+
+    if web_risk:
+        st.markdown("### Web Hazard Risk (Geo-Based)")
+        st.write(f"Risk Score: {web_risk.get('score', 'N/A')}")
+        st.write(f"Risk Level: {web_risk.get('level', 'N/A')}")
+        geo_tokens = web_risk.get("geo_tokens") or []
+        detected = web_risk.get("detected_hazards") or {}
+        detected_labels = [k.title() for k, v in detected.items() if v]
+        st.write(f"Geographies Analyzed: {', '.join(geo_tokens) if geo_tokens else 'Not specified'}")
+        st.write(f"Hazard Categories Flagged: {', '.join(detected_labels) if detected_labels else 'None'}")
+        for idx, d in enumerate(web_risk.get("drivers") or [], start=1):
+            st.markdown(f"{idx}. {d}")
+        if geo_web_prompt:
+            st.caption(f"Geo Risk SERP Prompt: {geo_web_prompt}")
+        if geo_web_summary:
+            st.markdown("#### Geo Risk Web Summary")
+            st.markdown(geo_web_summary)
+        if geo_web_links:
+            st.markdown("#### Geo Risk Web Links")
+            for idx, item in enumerate(geo_web_links[:5], start=1):
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    st.markdown(f"**{idx}.** {item[0]}")
+                    st.markdown(f"_Summary:_ {item[1]}")
+                else:
+                    st.markdown(f"**{idx}.** {item}")
+
+    if metric_scores:
+        st.markdown("### Normalization Layer (0-100)")
+        metric_df = pd.DataFrame(
+            [
+                {"Metric": k.replace("_", " ").title(), "Normalized Score": v}
+                for k, v in metric_scores.items()
+            ]
+        )
+        st.dataframe(metric_df, use_container_width=True, hide_index=True)
+
+    if weighted:
+        st.markdown("### Weighted Scoring Engine")
+        weighted_df = pd.DataFrame(
+            [
+                {"Metric": k.replace("_", " ").title(), "Weighted Contribution": v}
+                for k, v in weighted.items()
+            ]
+        ).sort_values("Weighted Contribution", ascending=False)
+        st.dataframe(weighted_df, use_container_width=True, hide_index=True)
+
+    conditions = last_output.get("eoi_conditions") or []
+    if conditions:
+        st.markdown("### Conditions")
+        for idx, cond in enumerate(conditions, start=1):
+            st.markdown(f"{idx}. {cond}")
+
     st.markdown("### Document Insights")
     st.markdown(last_output.get("eoi_doc_insights") or "No document insights generated.")
 
@@ -201,6 +308,10 @@ if last_output:
         st.code(last_output["sql_query"], language="sql")
 
     result_df = last_output.get("sql_result")
+    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+        drop_cols = [c for c in result_df.columns if str(c).strip().lower() in {"lob_hint", "source_db"}]
+        if drop_cols:
+            result_df = result_df.drop(columns=drop_cols, errors="ignore")
     formatted = _format_dataframe_for_display(result_df)
     if isinstance(formatted, pd.DataFrame) and not formatted.empty:
         st.markdown("### Internal Data Snapshot")
@@ -243,15 +354,15 @@ if last_output:
 
 if st.session_state.eoi_generated_doc and st.session_state.eoi_show_download_dialog:
     if hasattr(st, "dialog"):
-        @st.dialog("EOI Document Ready")
+        @st.dialog("Final Document Ready")
         def _download_dialog() -> None:
             _show_download_dialog()
 
         _download_dialog()
     else:
-        st.success("EOI generation completed.")
+        st.success("Final document generated.")
         st.download_button(
-            "Download EOI Document",
+            "Download Final Document",
             data=st.session_state.eoi_generated_doc,
             file_name=st.session_state.eoi_generated_name,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
