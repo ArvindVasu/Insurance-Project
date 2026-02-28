@@ -48,14 +48,32 @@ SCORE_BANDS = {
 }
 
 METRIC_WEIGHTS = {
-    "loss_ratio": 0.25,
-    "portfolio_comparison": 0.15,
+    "loss_quality_composite": 0.25,
+    "loss_pattern_risk": 0.15,
     "revenue_scale_risk": 0.10,
     "geographic_spread_risk": 0.15,
     "risk_management_quality": 0.10,
     "external_risk": 0.10,
     "coverage_complexity": 0.10,
     "guideline_fit": 0.05,
+}
+
+LOSS_PATTERN_WEIGHTS = {
+    "claims_frequency_percentile": 0.40,
+    "severity_percentile": 0.40,
+    "incurred_percentile": 0.20,
+}
+
+SQL_HIDDEN_OUTPUT_COLUMNS = {
+    "total_incurred_loss",
+    "loss_ratio_percentile_basis",
+    "loss_ratio_source",
+    "client_loss_ratio_source",
+    "client_claims_frequency_source",
+    "client_severity_source",
+    "client_incurred_source",
+    "lob_hint",
+    "source_db",
 }
 
 WEB_RISK_BANDS = {
@@ -565,22 +583,119 @@ def _extract_client_loss_ratio(
     return None, "not_found"
 
 
-def _align_loss_ratio_scale(client_ratio: float, portfolio_series: pd.Series) -> float:
+def _extract_client_frequency(
+    user_prompt: str,
+    broker_fields: dict[str, str] | None,
+    broker_text: str | None,
+) -> tuple[float | None, str]:
+    fields = broker_fields or {}
+    candidates = [
+        ("claims_history", str(fields.get("claims_history") or "")),
+        ("user_prompt", str(user_prompt or "")),
+        ("broker_text", str(broker_text or "")),
+    ]
+    patterns = [
+        r"(?:claims?\s*frequency|frequency)[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)",
+        r"([0-9]+(?:\.[0-9]+)?)\s*claims?(?:\s*(?:per\s*year|/yr|yearly))?",
+        r"number\s*of\s*claims?[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)",
+    ]
+    for src, text in candidates:
+        low = text.lower()
+        for pat in patterns:
+            m = re.search(pat, low, flags=re.IGNORECASE)
+            if not m:
+                continue
+            val = _to_float(m.group(1))
+            if val is not None:
+                return val, src
+    return None, "not_found"
+
+
+def _extract_client_severity(
+    user_prompt: str,
+    broker_fields: dict[str, str] | None,
+    broker_text: str | None,
+) -> tuple[float | None, str]:
+    fields = broker_fields or {}
+    candidates = [
+        ("claims_history", str(fields.get("claims_history") or "")),
+        ("user_prompt", str(user_prompt or "")),
+        ("broker_text", str(broker_text or "")),
+    ]
+    patterns = [
+        r"(?:largest|max(?:imum)?)\s*(?:single\s*)?loss[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"(?:severity|claim\s*severity)[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+    ]
+    for src, text in candidates:
+        low = text.lower()
+        for pat in patterns:
+            m = re.search(pat, low, flags=re.IGNORECASE)
+            if not m:
+                continue
+            val = _to_float(m.group(1))
+            if val is not None:
+                return val, src
+    return None, "not_found"
+
+
+def _extract_client_incurred_per_year(
+    user_prompt: str,
+    broker_fields: dict[str, str] | None,
+    broker_text: str | None,
+) -> tuple[float | None, str]:
+    fields = broker_fields or {}
+    candidates = [
+        ("claims_history", str(fields.get("claims_history") or "")),
+        ("user_prompt", str(user_prompt or "")),
+        ("broker_text", str(broker_text or "")),
+    ]
+    for src, text in candidates:
+        low = text.lower()
+        per_year_patterns = [
+            r"(?:incurred(?:\s*loss)?(?:\s*per\s*year)?|annual\s*incurred)[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+        ]
+        for pat in per_year_patterns:
+            m = re.search(pat, low, flags=re.IGNORECASE)
+            if not m:
+                continue
+            val = _to_float(m.group(1))
+            if val is not None:
+                return val, src
+
+        total_patterns = [
+            r"(?:total\s*)?incurred(?:\s*loss)?[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+        ]
+        years_match = re.search(r"(?:over|for|last)\s*([0-9]{1,2})\s*years?", low, flags=re.IGNORECASE)
+        years = _to_float(years_match.group(1)) if years_match else 5.0
+        years = years if years and years > 0 else 5.0
+        for pat in total_patterns:
+            m = re.search(pat, low, flags=re.IGNORECASE)
+            if not m:
+                continue
+            total_val = _to_float(m.group(1))
+            if total_val is not None:
+                return total_val / years, src
+    return None, "not_found"
+
+
+def _align_metric_scale(client_value: float, portfolio_series: pd.Series, ratio_mode: bool = False) -> float:
     """
-    Normalize client ratio scale to portfolio scale:
-    - portfolio likely percent if median > 1.5
-    - portfolio likely fraction if median <= 1.5
+    Align client scale to portfolio scale:
+    - ratio_mode=True handles ratio fields where source may be in percent or fraction
+    - otherwise return numeric value unchanged
     """
     if portfolio_series.empty:
-        return client_ratio
+        return client_value
+    if not ratio_mode:
+        return client_value
     med = float(portfolio_series.median())
     portfolio_is_percent = med > 1.5
-    client_is_percent = client_ratio > 1.5
+    client_is_percent = client_value > 1.5
     if portfolio_is_percent and not client_is_percent:
-        return client_ratio * 100.0
+        return client_value * 100.0
     if not portfolio_is_percent and client_is_percent:
-        return client_ratio / 100.0
-    return client_ratio
+        return client_value / 100.0
+    return client_value
 
 
 def _run_internal_sql(
@@ -613,6 +728,7 @@ def _run_internal_sql(
                 agg_or_null("claims_frequency", "AVG", "avg_claims_frequency"),
                 agg_or_null("largest_single_loss", "AVG", "avg_largest_single_loss"),
                 agg_or_null("ultimate_premium", "AVG", "avg_ultimate_premium"),
+                agg_or_null("incurred_loss", "AVG", "avg_incurred_loss"),
                 agg_or_null("incurred_loss", "SUM", "total_incurred_loss"),
             ]
 
@@ -634,48 +750,88 @@ def _run_internal_sql(
                 sql_query += " WHERE " + " AND ".join(filters)
 
             stats_df = pd.read_sql_query(sql_query, conn, params=params)
-            if has_col("loss_ratio"):
-                dist_query = f"SELECT loss_ratio FROM {table} WHERE loss_ratio IS NOT NULL"
-            else:
-                dist_query = "SELECT NULL AS loss_ratio WHERE 1=0"
-            dist_params: list[Any] = []
-            if filters and has_col("loss_ratio"):
-                dist_query += " AND " + " AND ".join(filters)
-                dist_params = params
-            loss_ratio_df = pd.read_sql_query(dist_query, conn, params=dist_params)
+
+            def _load_distribution(metric_col: str) -> pd.Series:
+                if not has_col(metric_col):
+                    return pd.Series(dtype="float64")
+                dist_query = f"SELECT {metric_col} FROM {table} WHERE {metric_col} IS NOT NULL"
+                dist_params: list[Any] = []
+                if filters:
+                    dist_query += " AND " + " AND ".join(filters)
+                    dist_params = list(params)
+                dist_df = pd.read_sql_query(dist_query, conn, params=dist_params)
+                return pd.to_numeric(dist_df[metric_col], errors="coerce").dropna()
+
+            loss_ratio_series = _load_distribution("loss_ratio")
+            claims_freq_series = _load_distribution("claims_frequency")
+            severity_series = _load_distribution("largest_single_loss")
+            incurred_series = _load_distribution("incurred_loss")
         finally:
             conn.close()
 
         if stats_df.empty:
             return sql_query, pd.DataFrame([{"Error": "No rows returned from underwriting_dataset."}])
 
-        avg_loss_ratio = _to_float(stats_df.iloc[0].get("avg_loss_ratio"))
         client_loss_ratio_raw, client_lr_source = _extract_client_loss_ratio(
             user_prompt=user_prompt,
             broker_fields=broker_fields,
             broker_text=broker_text,
         )
-        percentile = None
-        percentile_basis = "portfolio_avg_loss_ratio"
+        client_freq_raw, client_freq_source = _extract_client_frequency(
+            user_prompt=user_prompt,
+            broker_fields=broker_fields,
+            broker_text=broker_text,
+        )
+        client_severity_raw, client_severity_source = _extract_client_severity(
+            user_prompt=user_prompt,
+            broker_fields=broker_fields,
+            broker_text=broker_text,
+        )
+        client_incurred_raw, client_incurred_source = _extract_client_incurred_per_year(
+            user_prompt=user_prompt,
+            broker_fields=broker_fields,
+            broker_text=broker_text,
+        )
+
+        percentile = 50.0
+        percentile_basis = "neutral_default"
         client_loss_ratio_aligned = None
-        if not loss_ratio_df.empty:
-            series = pd.to_numeric(loss_ratio_df["loss_ratio"], errors="coerce").dropna()
-            if not series.empty:
-                if client_loss_ratio_raw is not None:
-                    client_loss_ratio_aligned = _align_loss_ratio_scale(client_loss_ratio_raw, series)
-                    percentile = float((series <= client_loss_ratio_aligned).mean() * 100.0)
-                    percentile_basis = "client_loss_ratio"
-                else:
-                    percentile = 50.0
-                    percentile_basis = "neutral_default"                    
-                # elif avg_loss_ratio is not None:
-                #     # Backward-compatible fallback when client ratio is unavailable.
-                #     percentile = float((series <= avg_loss_ratio).mean() * 100.0)
+        if not loss_ratio_series.empty and client_loss_ratio_raw is not None:
+            client_loss_ratio_aligned = _align_metric_scale(client_loss_ratio_raw, loss_ratio_series, ratio_mode=True)
+            percentile = float((loss_ratio_series <= client_loss_ratio_aligned).mean() * 100.0)
+            percentile_basis = "client_loss_ratio"
+
+        claims_freq_percentile = 50.0
+        client_freq_aligned = None
+        if not claims_freq_series.empty and client_freq_raw is not None:
+            client_freq_aligned = _align_metric_scale(client_freq_raw, claims_freq_series)
+            claims_freq_percentile = float((claims_freq_series <= client_freq_aligned).mean() * 100.0)
+
+        severity_percentile = 50.0
+        client_severity_aligned = None
+        if not severity_series.empty and client_severity_raw is not None:
+            client_severity_aligned = _align_metric_scale(client_severity_raw, severity_series)
+            severity_percentile = float((severity_series <= client_severity_aligned).mean() * 100.0)
+
+        incurred_percentile = 50.0
+        client_incurred_aligned = None
+        if not incurred_series.empty and client_incurred_raw is not None:
+            client_incurred_aligned = _align_metric_scale(client_incurred_raw, incurred_series)
+            incurred_percentile = float((incurred_series <= client_incurred_aligned).mean() * 100.0)
 
         stats_df["loss_ratio_percentile"] = percentile
         stats_df["loss_ratio_percentile_basis"] = percentile_basis
         stats_df["client_loss_ratio"] = client_loss_ratio_aligned
         stats_df["client_loss_ratio_source"] = client_lr_source
+        stats_df["claims_frequency_percentile"] = claims_freq_percentile
+        stats_df["client_claims_frequency"] = client_freq_aligned
+        stats_df["client_claims_frequency_source"] = client_freq_source
+        stats_df["severity_percentile"] = severity_percentile
+        stats_df["client_severity"] = client_severity_aligned
+        stats_df["client_severity_source"] = client_severity_source
+        stats_df["incurred_percentile"] = incurred_percentile
+        stats_df["client_incurred_per_year"] = client_incurred_aligned
+        stats_df["client_incurred_source"] = client_incurred_source
         stats_df["lob_hint"] = lob_hint or "Not inferred"
         stats_df["source_db"] = str(db_path)
         return sql_query, stats_df
@@ -755,11 +911,12 @@ def _compute_risk_decision(
     if isinstance(sql_result, pd.DataFrame) and not sql_result.empty:
         row = sql_result.fillna("").iloc[0].to_dict()
 
-    # avg_loss_ratio = _to_float(row.get("avg_loss_ratio"))
     client_lr = _to_float(row.get("client_loss_ratio"))
-    avg_loss_ratio = client_lr if client_lr is not None else _to_float(row.get("avg_loss_ratio"))
-    
+    avg_loss_ratio = _to_float(row.get("avg_loss_ratio"))
     percentile = _to_float(row.get("loss_ratio_percentile"))
+    claims_freq_percentile = _to_float(row.get("claims_frequency_percentile"))
+    severity_percentile = _to_float(row.get("severity_percentile"))
+    incurred_percentile = _to_float(row.get("incurred_percentile"))
     sum_insured = _to_float(broker_fields.get("expected_sum_insured"))
     profile = risk_profile or {}
     turnover_val = _to_float(profile.get("turnover"))
@@ -775,16 +932,26 @@ def _compute_risk_decision(
     hard_rules = []
     if any(x in low_web for x in ["sanction", "ofac", "blacklist"]):
         hard_rules.append("Sanctions hit detected in external screening.")
-    if avg_loss_ratio is not None and avg_loss_ratio > 120:
-        hard_rules.append(f"Average loss ratio above decline threshold ({avg_loss_ratio:.1f} > 120).")
+    ratio_for_hard_rule = client_lr if client_lr is not None else avg_loss_ratio
+    if ratio_for_hard_rule is not None:
+        ratio_percent_value = ratio_for_hard_rule * 100.0 if ratio_for_hard_rule <= 1.5 else ratio_for_hard_rule
+        if ratio_percent_value > 120:
+            hard_rules.append(f"Average loss ratio above decline threshold ({ratio_percent_value:.1f} > 120).")
     if any(x in low_intranet for x in ["exceeds authority", "beyond authority", "referral required"]):
         hard_rules.append("Requested limit exceeds delegated authority.")
     if any(x in low_intranet for x in ["do not underwrite", "decline", "prohibited"]):
         hard_rules.append("Guideline hard-stop identified in intranet policy.")
 
+    loss_quality_composite = max(0.0, min(100.0, percentile if percentile is not None else 50.0))
+    loss_pattern_risk = (
+        (claims_freq_percentile if claims_freq_percentile is not None else 50.0) * LOSS_PATTERN_WEIGHTS["claims_frequency_percentile"]
+        + (severity_percentile if severity_percentile is not None else 50.0) * LOSS_PATTERN_WEIGHTS["severity_percentile"]
+        + (incurred_percentile if incurred_percentile is not None else 50.0) * LOSS_PATTERN_WEIGHTS["incurred_percentile"]
+    )
+
     metric_scores = {
-        "loss_ratio": _normalize_loss_ratio(avg_loss_ratio),
-        "portfolio_comparison": max(0.0, min(100.0, percentile if percentile is not None else 50.0)),
+        "loss_quality_composite": round(loss_quality_composite, 2),
+        "loss_pattern_risk": round(max(0.0, min(100.0, loss_pattern_risk)), 2),
         "revenue_scale_risk": (
             70.0
             if (turnover_val or 0) >= 500000000
@@ -798,7 +965,7 @@ def _compute_risk_decision(
             95.0,
             20.0 + 15.0 * max(0, int(sites_val) - 1) if sites_val is not None else 20.0 + 15.0 * max(0, len(countries) - 1),
         ),
-        "risk_management_quality": _keyword_score(
+        "risk_management_quality": 100.0 - _keyword_score(
             low_doc,
             positive=["strong controls", "certified", "iso", "compliant", "risk management framework"],
             negative=["weak control", "control gap", "incident", "non-compliance", "poor governance"],
@@ -816,7 +983,7 @@ def _compute_risk_decision(
             negative=["umbrella", "excess", "multi-country", "manuscript wording", "bespoke"],
             neutral_default=45.0,
         ),
-        "guideline_fit": _keyword_score(
+        "guideline_fit": 100.0 - _keyword_score(
             low_intranet,
             positive=["within appetite", "accepted", "business written"],
             negative=["outside appetite", "not written", "excluded", "restricted"],
@@ -828,7 +995,7 @@ def _compute_risk_decision(
     risk_score = round(sum(weighted.values()), 2)
 
     available_signals = 0
-    for signal in [avg_loss_ratio, percentile, web_summary, intranet_summary, doc_insights]:
+    for signal in [client_lr, avg_loss_ratio, percentile, claims_freq_percentile, severity_percentile, incurred_percentile, web_summary, intranet_summary, doc_insights]:
         if signal not in [None, "", []]:
             available_signals += 1
     confidence = round(min(98.0, 45.0 + available_signals * 10.0), 1)
@@ -1588,7 +1755,9 @@ def _claims_history_df_from_state(eoi_state: dict[str, Any] | None) -> pd.DataFr
         return None
     if "Error" in sql_result.columns:
         return None
-    return sql_result.head(8).copy()
+    drop_cols = [c for c in sql_result.columns if str(c).strip().lower() in SQL_HIDDEN_OUTPUT_COLUMNS]
+    view = sql_result.drop(columns=drop_cols, errors="ignore")
+    return view.head(8).copy()
 
 
 def _add_claims_history_table(doc: Document, df: pd.DataFrame) -> None:
@@ -1749,7 +1918,8 @@ def _sql_dataframe_to_table_lines(df: pd.DataFrame, max_rows: int = 5) -> list[s
     if not isinstance(df, pd.DataFrame) or df.empty or "Error" in df.columns:
         return ["| Status |", "| --- |", "| No structured SQL output available. |"]
 
-    view = df.head(max_rows).fillna("").copy()
+    drop_cols = [c for c in df.columns if str(c).strip().lower() in SQL_HIDDEN_OUTPUT_COLUMNS]
+    view = df.drop(columns=drop_cols, errors="ignore").head(max_rows).fillna("").copy()
     cols = [str(c) for c in view.columns]
     lines = []
     lines.append("| " + " | ".join(cols) + " |")
@@ -1764,8 +1934,7 @@ def _sql_dataframe_for_doc_table(df: pd.DataFrame | None, max_rows: int = 5) -> 
     if not isinstance(df, pd.DataFrame) or df.empty or "Error" in df.columns:
         return ["Status"], [["No structured SQL output available."]]
 
-    excluded = {"lob_hint", "source_db"}
-    keep_cols = [c for c in df.columns if str(c).strip().lower() not in excluded]
+    keep_cols = [c for c in df.columns if str(c).strip().lower() not in SQL_HIDDEN_OUTPUT_COLUMNS]
     view = df[keep_cols].head(max_rows).fillna("").copy() if keep_cols else pd.DataFrame()
     if view.empty:
         return ["Status"], [["No structured SQL output available."]]

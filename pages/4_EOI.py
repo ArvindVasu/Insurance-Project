@@ -30,6 +30,18 @@ if "eoi_generated_name" not in st.session_state:
 if "eoi_show_download_dialog" not in st.session_state:
     st.session_state.eoi_show_download_dialog = False
 
+SQL_HIDDEN_OUTPUT_COLUMNS = {
+    "total_incurred_loss",
+    "loss_ratio_percentile_basis",
+    "loss_ratio_source",
+    "client_loss_ratio_source",
+    "client_claims_frequency_source",
+    "client_severity_source",
+    "client_incurred_source",
+    "lob_hint",
+    "source_db",
+}
+
 
 
 
@@ -41,6 +53,20 @@ def _decision_to_button_label(decision: str | None) -> str:
         "DECLINE": "Generate Final Document (Decline Letter)",
     }
     return mapping.get(str(decision or "").upper(), "Generate Final Document")
+
+
+def _metric_label(metric_key: str) -> str:
+    labels = {
+        "loss_quality_composite": "Loss Quality Composite (Loss Ratio Percentile)",
+        "loss_pattern_risk": "Loss Pattern Risk (Freq/Severity/Incurred)",
+        "revenue_scale_risk": "Revenue Scale Risk",
+        "geographic_spread_risk": "Geographic Spread Risk",
+        "risk_management_quality": "Risk Management Quality (Inverted)",
+        "external_risk": "External Risk",
+        "coverage_complexity": "Coverage Complexity",
+        "guideline_fit": "Guideline Fit (Inverted)",
+    }
+    return labels.get(metric_key, metric_key.replace("_", " ").title())
 
 
 def _generate_final_document() -> None:
@@ -276,20 +302,44 @@ if last_output:
 
     if metric_scores:
         st.markdown("### Normalization Layer (0-100)")
+        metric_order = [
+            "loss_quality_composite",
+            "loss_pattern_risk",
+            "revenue_scale_risk",
+            "geographic_spread_risk",
+            "risk_management_quality",
+            "external_risk",
+            "coverage_complexity",
+            "guideline_fit",
+        ]
+        ordered_metrics = [(k, metric_scores[k]) for k in metric_order if k in metric_scores]
+        ordered_metrics.extend([(k, v) for k, v in metric_scores.items() if k not in metric_order])
         metric_df = pd.DataFrame(
             [
-                {"Metric": k.replace("_", " ").title(), "Normalized Score": v}
-                for k, v in metric_scores.items()
+                {"Metric": _metric_label(k), "Normalized Score": v}
+                for k, v in ordered_metrics
             ]
         )
         st.dataframe(metric_df, use_container_width=True, hide_index=True)
 
     if weighted:
         st.markdown("### Weighted Scoring Engine")
+        metric_order = [
+            "loss_quality_composite",
+            "loss_pattern_risk",
+            "revenue_scale_risk",
+            "geographic_spread_risk",
+            "risk_management_quality",
+            "external_risk",
+            "coverage_complexity",
+            "guideline_fit",
+        ]
+        ordered_weighted = [(k, weighted[k]) for k in metric_order if k in weighted]
+        ordered_weighted.extend([(k, v) for k, v in weighted.items() if k not in metric_order])
         weighted_df = pd.DataFrame(
             [
-                {"Metric": k.replace("_", " ").title(), "Weighted Contribution": v}
-                for k, v in weighted.items()
+                {"Metric": _metric_label(k), "Weighted Contribution": v}
+                for k, v in ordered_weighted
             ]
         ).sort_values("Weighted Contribution", ascending=False)
         st.dataframe(weighted_df, use_container_width=True, hide_index=True)
@@ -309,7 +359,7 @@ if last_output:
 
     result_df = last_output.get("sql_result")
     if isinstance(result_df, pd.DataFrame) and not result_df.empty:
-        drop_cols = [c for c in result_df.columns if str(c).strip().lower() in {"lob_hint", "source_db"}]
+        drop_cols = [c for c in result_df.columns if str(c).strip().lower() in SQL_HIDDEN_OUTPUT_COLUMNS]
         if drop_cols:
             result_df = result_df.drop(columns=drop_cols, errors="ignore")
     formatted = _format_dataframe_for_display(result_df)
