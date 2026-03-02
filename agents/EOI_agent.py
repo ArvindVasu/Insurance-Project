@@ -409,6 +409,73 @@ def _normalize_complete_sentences(text: str, max_sentences: int = 5) -> str:
     return " ".join(sentences[:max_sentences])
 
 
+def _looks_fragmented_geo_summary(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return True
+    # Heading-like snippets such as "4. Contents" or "3. The Role of ...".
+    if re.match(r"^\d+\.?\s+[A-Za-z][A-Za-z\s:&()/-]{1,90}$", cleaned):
+        return True
+    if re.match(r"^(contents|table of contents|introduction|overview)$", cleaned, flags=re.IGNORECASE):
+        return True
+    words = re.findall(r"[A-Za-z]+", cleaned)
+    if len(words) < 8:
+        return True
+    return False
+
+
+def _llm_geo_link_summary(title: str, summary: str) -> str:
+    prompt = f"""
+You are an insurance underwriting analyst.
+
+Rewrite the following web snippet into exactly 2 to 3 complete sentences.
+Requirements:
+- Complete sentences only (no fragments, no headings).
+- Focus on geography-based risk signals relevant to calamity, crime, and strike risk.
+- Keep it concise and professional for underwriting review.
+- Do not include bullet points.
+
+Title: {title}
+Snippet: {summary}
+"""
+    try:
+        raw = call_llm(prompt).strip()
+        return _normalize_complete_sentences(raw, max_sentences=3)
+    except Exception:
+        return ""
+
+
+def _build_geo_link_summary(title: str, summary: str) -> str:
+    normalized = _normalize_complete_sentences(summary, max_sentences=3)
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", normalized) if s.strip()]
+    if len(sentences) >= 2 and not _looks_fragmented_geo_summary(normalized):
+        llm_out = _llm_geo_link_summary(title, normalized)
+        if llm_out:
+            return llm_out
+        return " ".join(sentences[:3])
+
+    title_clean = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not title_clean:
+        title_clean = "Referenced external source"
+    title_clean = re.sub(r"^[0-9]+\.\s*", "", title_clean).strip()
+
+    llm_out = _llm_geo_link_summary(title_clean, normalized or summary)
+    if llm_out:
+        llm_sentences = [s for s in re.split(r"(?<=[.!?])\s+", llm_out) if s.strip()]
+        if len(llm_sentences) >= 2:
+            return " ".join(llm_sentences[:3])
+
+    fallback_extra = [
+        _ensure_sentence(f"The source '{title_clean}' provides geography-related external risk context for underwriting review"),
+        "This signal is considered for calamity, crime, and strike exposure at the insured geography.",
+        "The insight is used as supporting context in the geo-risk scoring layer and does not replace internal policy controls.",
+    ]
+    base = sentences[0] if sentences and not _looks_fragmented_geo_summary(sentences[0]) else ""
+    parts = [_ensure_sentence(base)] if base else []
+    parts.extend(fallback_extra)
+    return " ".join([p for p in parts if p])
+
+
 def _compute_web_geo_risk(
     user_prompt: str,
     web_summary: str,
@@ -626,6 +693,145 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+AMOUNT_SCALE_FACTORS = {
+    "k": 1_000.0,
+    "thousand": 1_000.0,
+    "m": 1_000_000.0,
+    "mn": 1_000_000.0,
+    "mm": 1_000_000.0,
+    "million": 1_000_000.0,
+    "b": 1_000_000_000.0,
+    "bn": 1_000_000_000.0,
+    "billion": 1_000_000_000.0,
+    "lakh": 100_000.0,
+    "lac": 100_000.0,
+    "crore": 10_000_000.0,
+    "cr": 10_000_000.0,
+}
+
+
+def _parse_amount_with_scale(text: str | None) -> float | None:
+    s = str(text or "").strip().lower()
+    if not s:
+        return None
+    m = re.search(
+        r"([-+]?\d[\d,]*(?:\.\d+)?)\s*(k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr)?\b",
+        s,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        base = float(m.group(1).replace(",", ""))
+    except Exception:
+        return None
+    scale = (m.group(2) or "").lower()
+    factor = AMOUNT_SCALE_FACTORS.get(scale, 1.0)
+    return base * factor
+
+
+def _extract_yearly_incurred_amounts(text: str) -> list[float]:
+    values: list[float] = []
+    # Examples: "2020: 1.2 million", "FY2021 - 850000"
+    year_line = re.findall(
+        r"(?:fy\s*)?(?:19|20)\d{2}\s*[:\-]\s*([$€£]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr))?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    for raw in year_line:
+        amount = _parse_amount_with_scale(raw)
+        if amount is not None:
+            values.append(amount)
+    return values
+
+
+def _extract_year_span(text: str, default_years: float = 5.0) -> float:
+    match = re.search(r"(?:over|for|last|across|during)\s*([0-9]{1,2})\s*years?", text, flags=re.IGNORECASE)
+    years = _to_float(match.group(1)) if match else default_years
+    return years if years and years > 0 else default_years
+
+
+def _extract_yearly_claim_counts(text: str) -> list[float]:
+    values: list[float] = []
+    # Examples: "2021: 12 claims", "FY2022 - 8"
+    matches = re.findall(
+        r"(?:fy\s*)?(?:19|20)\d{2}\s*[:\-]\s*([0-9]+(?:\.[0-9]+)?)\s*(?:claims?)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    for raw in matches:
+        val = _to_float(raw)
+        if val is not None:
+            values.append(val)
+    return values
+
+
+def _extract_yearly_largest_losses(text: str) -> list[float]:
+    values: list[float] = []
+
+    patterns = [
+        # Example: "FY2022: Largest Loss 1.25 million"
+        r"(?:fy\s*)?(?:19|20)\d{2}\s*[:\-]\s*(?:largest\s*(?:single\s*)?loss|max(?:imum)?\s*loss)[^0-9]{0,25}([$€£]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr))?)",
+        # Example: "Largest loss ... FY2022 ... 1.25m"
+        r"(?:largest\s*(?:single\s*)?loss|max(?:imum)?\s*loss)[^\n\r]{0,60}(?:fy\s*)?(?:19|20)\d{2}[^\n\r]{0,20}([$€£]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr))?)",
+    ]
+
+    for pat in patterns:
+        matches = re.findall(pat, text, flags=re.IGNORECASE)
+        for raw in matches:
+            amount = _parse_amount_with_scale(raw)
+            if amount is not None:
+                values.append(amount)
+
+    return values
+
+
+def _extract_loss_history_rows(text: str) -> list[tuple[int, float, float]]:
+    """
+    Extract tabular loss-history rows in the common format:
+    YEAR  NUMBER_OF_CLAIMS  INCURRED  LARGEST_LOSS
+    """
+    rows: list[tuple[int, float, float]] = []
+    pattern = re.compile(
+        r"\b((?:19|20)\d{2})\b\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)",
+        flags=re.IGNORECASE,
+    )
+    for m in pattern.finditer(text):
+        year = int(m.group(1))
+        if year < 1990 or year > 2100:
+            continue
+        incurred = _to_float(m.group(3))
+        largest = _to_float(m.group(4))
+        if incurred is None or largest is None:
+            continue
+        rows.append((year, incurred, largest))
+    return rows
+
+
+def _is_plausible_loss_amount(value: float | None) -> bool:
+    if value is None:
+        return False
+    # Guard against capturing section numbers like "5." as severity/loss.
+    return value >= 1_000.0
+
+
+def _parse_ratio_from_text(value: str | None) -> float | None:
+    s = str(value or "").strip().lower()
+    if not s:
+        return None
+    m = re.search(r"([-+]?\d[\d,]*(?:\.\d+)?)\s*(%|percent|percentage)?\b", s, flags=re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        num = float(m.group(1).replace(",", ""))
+    except Exception:
+        return None
+    # Keep as percent-scale value when percentage marker exists.
+    if m.group(2):
+        return num
+    return num
+
+
 def _sql_literal(value: Any) -> str:
     if value is None:
         return "NULL"
@@ -661,6 +867,7 @@ def _extract_client_loss_ratio(
     ]
     patterns = [
         r"loss\s*ratio[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*%",
+        r"loss\s*ratio[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*(?:percent|percentage)",
         r"loss\s*ratio[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)",
     ]
     for src, text in candidates:
@@ -669,7 +876,7 @@ def _extract_client_loss_ratio(
             m = re.search(pat, low, flags=re.IGNORECASE)
             if not m:
                 continue
-            val = _to_float(m.group(1))
+            val = _parse_ratio_from_text(m.group(1))
             if val is not None:
                 return val, src
     return None, "not_found"
@@ -686,18 +893,50 @@ def _extract_client_frequency(
         ("user_prompt", str(user_prompt or "")),
         ("broker_text", str(broker_text or "")),
     ]
-    patterns = [
-        r"(?:claims?\s*frequency|frequency)[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)",
-        r"([0-9]+(?:\.[0-9]+)?)\s*claims?(?:\s*(?:per\s*year|/yr|yearly))?",
-        r"number\s*of\s*claims?[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)",
-    ]
     for src, text in candidates:
         low = text.lower()
-        for pat in patterns:
+
+        yearly_counts = _extract_yearly_claim_counts(low)
+        if len(yearly_counts) >= 1:
+            return float(sum(yearly_counts) / len(yearly_counts)), src
+
+        # Primary signal: "Number of Claims" entries in broker submission.
+        num_claims_patterns = [
+            r"number\s*of\s*claims?[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*(?:per\s*year|/yr|yearly)?",
+            r"claims?\s*count[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*(?:per\s*year|/yr|yearly)?",
+            r"([0-9]+(?:\.[0-9]+)?)\s*claims?\s*(?:per\s*year|/yr|yearly)",
+        ]
+        for pat in num_claims_patterns:
             m = re.search(pat, low, flags=re.IGNORECASE)
             if not m:
                 continue
             val = _to_float(m.group(1))
+            if val is not None:
+                return val, src
+
+        total_claims_match = re.search(
+            r"([0-9]+(?:\.[0-9]+)?)\s*claims?\s*(?:over|for|across|during|in)\s*([0-9]{1,2})\s*years?",
+            low,
+            flags=re.IGNORECASE,
+        )
+        if total_claims_match:
+            total_claims = _to_float(total_claims_match.group(1))
+            years = _to_float(total_claims_match.group(2))
+            if total_claims is not None and years and years > 0:
+                return total_claims / years, src
+
+        # If claims count is stated without per-year context, normalize by detected year span.
+        generic_claims = re.search(r"(?:total\s*)?claims?[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)", low, flags=re.IGNORECASE)
+        if generic_claims:
+            total_claims = _to_float(generic_claims.group(1))
+            if total_claims is not None:
+                years = _extract_year_span(low, default_years=5.0)
+                return total_claims / years, src
+
+        # Fallback only: if explicit claims counts are absent, use reported frequency value.
+        freq_fallback = re.search(r"(?:claims?\s*frequency|frequency)[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)", low, flags=re.IGNORECASE)
+        if freq_fallback:
+            val = _to_float(freq_fallback.group(1))
             if val is not None:
                 return val, src
     return None, "not_found"
@@ -710,22 +949,33 @@ def _extract_client_severity(
 ) -> tuple[float | None, str]:
     fields = broker_fields or {}
     candidates = [
+        ("broker_text", str(broker_text or "")),
         ("claims_history", str(fields.get("claims_history") or "")),
         ("user_prompt", str(user_prompt or "")),
-        ("broker_text", str(broker_text or "")),
     ]
     patterns = [
-        r"(?:largest|max(?:imum)?)\s*(?:single\s*)?loss[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
-        r"(?:severity|claim\s*severity)[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"(?:largest|max(?:imum)?)\s*(?:single\s*)?loss[^0-9]{0,25}([$€£]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr))?)",
     ]
     for src, text in candidates:
         low = text.lower()
+        # Highest-priority path: table rows from loss history section.
+        table_rows = _extract_loss_history_rows(low)
+        if table_rows:
+            losses = [r[2] for r in table_rows if _is_plausible_loss_amount(r[2])]
+            if losses:
+                return float(sum(losses) / len(losses)), src
+
+        yearly_losses = _extract_yearly_largest_losses(low)
+        yearly_losses = [v for v in yearly_losses if _is_plausible_loss_amount(v)]
+        if len(yearly_losses) >= 1:
+            # Use average annual largest loss to keep it on per-year basis.
+            return float(sum(yearly_losses) / len(yearly_losses)), src
         for pat in patterns:
             m = re.search(pat, low, flags=re.IGNORECASE)
             if not m:
                 continue
-            val = _to_float(m.group(1))
-            if val is not None:
+            val = _parse_amount_with_scale(m.group(1))
+            if _is_plausible_loss_amount(val):
                 return val, src
     return None, "not_found"
 
@@ -744,27 +994,29 @@ def _extract_client_incurred_per_year(
     for src, text in candidates:
         low = text.lower()
         per_year_patterns = [
-            r"(?:incurred(?:\s*loss)?(?:\s*per\s*year)?|annual\s*incurred)[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+            r"(?:incurred(?:\s*loss)?(?:\s*per\s*year)?|annual\s*incurred)[^0-9]{0,25}([$€£]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr))?)",
         ]
         for pat in per_year_patterns:
             m = re.search(pat, low, flags=re.IGNORECASE)
             if not m:
                 continue
-            val = _to_float(m.group(1))
+            val = _parse_amount_with_scale(m.group(1))
             if val is not None:
                 return val, src
 
+        yearly_values = _extract_yearly_incurred_amounts(low)
+        if len(yearly_values) >= 2:
+            return float(sum(yearly_values) / len(yearly_values)), src
+
         total_patterns = [
-            r"(?:total\s*)?incurred(?:\s*loss)?[^0-9]{0,25}([$]?\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+            r"(?:total\s*)?incurred(?:\s*loss)?[^0-9]{0,25}([$€£]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|m|mn|mm|million|b|bn|billion|lakh|lac|crore|cr))?)",
         ]
-        years_match = re.search(r"(?:over|for|last)\s*([0-9]{1,2})\s*years?", low, flags=re.IGNORECASE)
-        years = _to_float(years_match.group(1)) if years_match else 5.0
-        years = years if years and years > 0 else 5.0
+        years = _extract_year_span(low, default_years=5.0)
         for pat in total_patterns:
             m = re.search(pat, low, flags=re.IGNORECASE)
             if not m:
                 continue
-            total_val = _to_float(m.group(1))
+            total_val = _parse_amount_with_scale(m.group(1))
             if total_val is not None:
                 return total_val / years, src
     return None, "not_found"
@@ -864,14 +1116,10 @@ def _run_internal_sql(
             filters = []
             params: list[Any] = []
             if lob_hint:
-                lob_filter_parts = []
                 if has_col("class_of_business"):
+                    lob_filter_parts = []
                     lob_filter_parts.append("LOWER(class_of_business) LIKE ?")
                     params.append(f"%{lob_hint.lower()}%")
-                if has_col("risk_type"):
-                    lob_filter_parts.append("LOWER(risk_type) LIKE ?")
-                    params.append(f"%{lob_hint.lower()}%")
-                if lob_filter_parts:
                     filters.append("(" + " OR ".join(lob_filter_parts) + ")")
 
             sql_query = f"SELECT {', '.join(select_parts)} FROM {table}"
@@ -931,19 +1179,19 @@ def _run_internal_sql(
             percentile_basis = "client_loss_ratio"
 
         claims_freq_percentile = 50.0
-        client_freq_aligned = None
+        client_freq_aligned = client_freq_raw
         if not claims_freq_series.empty and client_freq_raw is not None:
             client_freq_aligned = _align_metric_scale(client_freq_raw, claims_freq_series)
             claims_freq_percentile = float((claims_freq_series <= client_freq_aligned).mean() * 100.0)
 
         severity_percentile = 50.0
-        client_severity_aligned = None
+        client_severity_aligned = client_severity_raw
         if not severity_series.empty and client_severity_raw is not None:
             client_severity_aligned = _align_metric_scale(client_severity_raw, severity_series)
             severity_percentile = float((severity_series <= client_severity_aligned).mean() * 100.0)
 
         incurred_percentile = 50.0
-        client_incurred_aligned = None
+        client_incurred_aligned = client_incurred_raw
         if not incurred_series.empty and client_incurred_raw is not None:
             client_incurred_aligned = _align_metric_scale(client_incurred_raw, incurred_series)
             incurred_percentile = float((incurred_series <= client_incurred_aligned).mean() * 100.0)
@@ -1214,6 +1462,20 @@ def _run_geo_risk_search(user_prompt: str, risk_profile: dict[str, Any] | None, 
     geo_prompt = _build_geo_risk_prompt(user_prompt, risk_profile, broker_fields)
     out = _run_external_search(geo_prompt)
     out["general_summary"] = _normalize_complete_sentences(str(out.get("general_summary") or ""), max_sentences=6)
+    normalized_links = []
+    for item in out.get("web_links") or []:
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("link") or "Web Source")
+            summary = str(item.get("summary") or item.get("snippet") or "")
+            normalized_links.append((title, _build_geo_link_summary(title, summary)))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            title = str(item[0] or "Web Source")
+            summary = str(item[1] or "")
+            normalized_links.append((title, _build_geo_link_summary(title, summary)))
+        else:
+            title = str(item or "Web Source")
+            normalized_links.append((title, _build_geo_link_summary(title, "")))
+    out["web_links"] = normalized_links
     return out | {"geo_prompt": geo_prompt}
 
 
@@ -1334,6 +1596,47 @@ def _to_short_blurb(text: str, max_sentences: int = 2, max_chars: int = 280) -> 
     return blurb[:max_chars].rstrip()
 
 
+def _fmt_currency(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"${value:,.2f}"
+
+
+def _llm_exec_summary(agent_name: str, raw_text: str, user_prompt: str) -> str:
+    prompt = f"""
+You are an underwriting analyst preparing an executive snapshot.
+
+Summarize the {agent_name} output into exactly 2 to 3 complete sentences.
+Requirements:
+- Use professional underwriting language.
+- Keep only decision-relevant points.
+- No bullet points.
+- No sentence fragments.
+
+User Prompt:
+{user_prompt}
+
+Agent Output:
+{raw_text[:4000]}
+"""
+    try:
+        raw = call_llm(prompt).strip()
+        normalized = _normalize_complete_sentences(raw, max_sentences=3)
+    except Exception:
+        normalized = _normalize_complete_sentences(raw_text, max_sentences=3)
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", normalized) if s.strip()]
+    if len(sentences) >= 2:
+        return "\n".join(sentences[:3])
+
+    base = _ensure_sentence(normalized or raw_text or f"{agent_name} signal is available for underwriting review")
+    fallback = [
+        f"{agent_name} output has been incorporated into the underwriting assessment.",
+        "The signal should be interpreted alongside internal policy, authority, and portfolio controls.",
+    ]
+    return "\n".join([base] + fallback)
+
+
 def _build_vanna_underwriter_summary(sql_result: pd.DataFrame | None) -> str:
     if not isinstance(sql_result, pd.DataFrame) or sql_result.empty:
         return "Internal portfolio benchmark is unavailable for this submission."
@@ -1369,23 +1672,23 @@ def _build_vanna_underwriter_summary(sql_result: pd.DataFrame | None) -> str:
 
     portfolio_terms: list[str] = []
     if avg_premium is not None:
-        portfolio_terms.append(f"average ultimate premium {avg_premium:,.2f}")
+        portfolio_terms.append(f"average ultimate premium {_fmt_currency(avg_premium)}")
     if avg_incurred is not None:
-        portfolio_terms.append(f"average incurred loss {avg_incurred:,.2f}")
+        portfolio_terms.append(f"average incurred loss {_fmt_currency(avg_incurred)}")
     if avg_claim_freq is not None:
         portfolio_terms.append(f"average claims frequency {avg_claim_freq:.2f}")
     if avg_severity is not None:
-        portfolio_terms.append(f"average severity (largest single loss) {avg_severity:,.2f}")
+        portfolio_terms.append(f"average severity (largest single loss) {_fmt_currency(avg_severity)}")
     if portfolio_terms:
         lines.append(_ensure_sentence(f"Portfolio benchmark shows {', '.join(portfolio_terms)}"))
 
     client_terms: list[str] = []
     if client_incurred is not None:
-        client_terms.append(f"client incurred per year {client_incurred:,.2f}")
+        client_terms.append(f"client incurred per year {_fmt_currency(client_incurred)}")
     if client_freq is not None:
         client_terms.append(f"client frequency {client_freq:.2f}")
     if client_severity is not None:
-        client_terms.append(f"client severity {client_severity:,.2f}")
+        client_terms.append(f"client severity {_fmt_currency(client_severity)}")
     if client_terms:
         lines.append(_ensure_sentence(f"Client-side extracted loss pattern indicates {', '.join(client_terms)}"))
 
@@ -1421,7 +1724,7 @@ def _build_executive_snapshot(
     web_link_summaries = " ".join(
         [str(item[1]) for item in (web_links or [])[:5] if isinstance(item, (list, tuple)) and len(item) >= 2 and item[1]]
     )
-    web_summary_short = _to_short_blurb(web_summary or web_link_summaries or "No external web summary available.")
+    web_summary_short = web_summary or web_link_summaries or "No external web summary available."
 
     vanna_short = _build_vanna_underwriter_summary(sql_result)
     decision_payload = decision_payload or {}
@@ -1446,10 +1749,10 @@ def _build_executive_snapshot(
         final_lines.append(f"Conditions: {'; '.join(conditions[:2])}")
 
     fallback = {
-        "document_agent_summary": _to_short_blurb(doc_insights or "No document insight available."),
-        "vanna_agent_summary": _to_short_blurb(vanna_short),
-        "web_agent_summary": web_summary_short,
-        "intranet_agent_summary": _to_short_blurb(intranet_summary or "No intranet policy insight available."),
+        "document_agent_summary": _llm_exec_summary("Document Agent", doc_insights or "No document insight available.", user_prompt),
+        "vanna_agent_summary": _llm_exec_summary("SQL Agent", vanna_short, user_prompt),
+        "web_agent_summary": _llm_exec_summary("Web Agent", web_summary_short, user_prompt),
+        "intranet_agent_summary": _llm_exec_summary("Intranet Agent", intranet_summary or "No intranet policy insight available.", user_prompt),
         "final_recommendation": "\n".join(final_lines),
         "decision": decision,
         "risk_score": str(risk_score if risk_score is not None else ""),

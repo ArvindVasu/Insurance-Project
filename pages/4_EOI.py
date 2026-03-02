@@ -235,10 +235,10 @@ if last_output:
     geo_web_links = last_output.get("eoi_geo_web_links") or []
     geo_web_prompt = last_output.get("eoi_geo_web_prompt") or ""
     if snapshot:
-        doc_txt = html.escape(str(snapshot.get("document_agent_summary", "Not available")))
-        vanna_txt = html.escape(str(snapshot.get("vanna_agent_summary", "Not available")))
-        web_txt = html.escape(str(snapshot.get("web_agent_summary", "Not available")))
-        intranet_txt = html.escape(str(snapshot.get("intranet_agent_summary", "Not available")))
+        doc_txt = html.escape(str(snapshot.get("document_agent_summary", "Not available"))).replace("\n", "<br>")
+        vanna_txt = html.escape(str(snapshot.get("vanna_agent_summary", "Not available"))).replace("\n", "<br>")
+        web_txt = html.escape(str(snapshot.get("web_agent_summary", "Not available"))).replace("\n", "<br>")
+        intranet_txt = html.escape(str(snapshot.get("intranet_agent_summary", "Not available"))).replace("\n", "<br>")
         rec_txt = html.escape(str(snapshot.get("final_recommendation", "Not available"))).replace("\n", "<br>")
         decision_txt = html.escape(str(last_output.get("eoi_decision") or snapshot.get("decision") or "Not available"))
         risk_txt = html.escape(str(last_output.get("eoi_risk_score") or snapshot.get("risk_score") or "Not available"))
@@ -251,7 +251,7 @@ if last_output:
   <p><strong>Risk Score:</strong> {risk_txt}</p>
   <p><strong>Confidence Score:</strong> {conf_txt}</p>
   <p><strong>Document Agent:</strong> {doc_txt}</p>
-  <p><strong>Vanna Agent:</strong> {vanna_txt}</p>
+  <p><strong>SQL Agent:</strong> {vanna_txt}</p>
   <p><strong>Web Agent:</strong> {web_txt}</p>
   <p><strong>Intranet Agent:</strong> {intranet_txt}</p>
   <p><strong>Final Recommendation:</strong> {rec_txt}</p>
