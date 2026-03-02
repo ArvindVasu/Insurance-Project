@@ -8,7 +8,6 @@ def visualize_workflow(builder, active_route=None):
     route_to_node = {
         "sql": "vanna_sql",
         "search": "serp_search",
-        "document": "doc_update",
         "faissdb": "faissdb",
         "comp": "comp",
         "intranet": "intranet"
@@ -18,9 +17,13 @@ def visualize_workflow(builder, active_route=None):
 
     G = nx.DiGraph()
     edge_styles = {}
+    hidden_nodes = {"doc_update"}
+    terminal_nodes = ["vanna_sql", "serp_search", "comp", "faissdb", "intranet"]
 
     # Add all nodes
     for node in builder.nodes:
+        if node in hidden_nodes:
+            continue
         G.add_node(node)
     G.add_node("__start__")
     G.add_node("__end__")
@@ -30,7 +33,6 @@ def visualize_workflow(builder, active_route=None):
         G.add_edge("__start__", "router")
         edge_styles[("__start__", "router")] = {"style": "solid", "color": "black", "width": 1.8}
 
-    terminal_nodes = ["vanna_sql", "serp_search", "doc_update", "comp", "faissdb", "intranet"]
     for source in terminal_nodes:
         if source in G.nodes:
             G.add_edge(source, "__end__")
@@ -48,18 +50,17 @@ def visualize_workflow(builder, active_route=None):
     if highlight_node:
         edge_styles[("router", highlight_node)] = {"style": "solid", "color": "red", "width": 2.5}
 
-    # Positions for nodes
+    # Positions for nodes with equal horizontal spacing across the terminal row.
     pos = {
-        "__start__": (2, 4),
-        "router": (2, 3),
-        "vanna_sql": (0, 2),
-        "serp_search": (1, 2),
-        "doc_update": (2, 2),
-        "comp": (3, 2),
-        "faissdb": (4, 2),
-        "intranet": (5, 2),
-        "__end__": (2, 1),
+        "__start__": (0.0, 4.0),
+        "router": (0.0, 3.0),
+        "__end__": (0.0, 1.0),
     }
+    present_terminals = [n for n in terminal_nodes if n in G.nodes]
+    if present_terminals:
+        midpoint = (len(present_terminals) - 1) / 2
+        for idx, node in enumerate(present_terminals):
+            pos[node] = (idx - midpoint, 2.0)
 
     # Requested palette
     color_start_end = "#DCEEFF"   # light blue
@@ -78,7 +79,7 @@ def visualize_workflow(builder, active_route=None):
 
     node_colors = [node_color(n) for n in G.nodes]
 
-    fig, ax = plt.subplots(figsize=(8.4, 5.4))
+    fig, ax = plt.subplots(figsize=(9.6, 5.4))
     ax.set_facecolor("#F8FBFF")
     fig.patch.set_facecolor("#F8FBFF")
 

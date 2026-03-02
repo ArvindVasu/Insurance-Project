@@ -307,33 +307,106 @@ DOCUMENT TEXT:
         return base
 
 
+def _clean_geo_candidate(value: str) -> str:
+    token = re.sub(r"\s+", " ", str(value or "")).strip(" ,;:.-")
+    token = re.sub(r"\b(?:and|or|the)\b$", "", token, flags=re.IGNORECASE).strip(" ,;:.-")
+    if not token:
+        return ""
+    if len(token) < 2 or len(token) > 60:
+        return ""
+    # Avoid instruction/noise fragments leaking into geography output.
+    noise_phrases = [
+        "summarize the attached broker",
+        "submission document",
+        "international casualty",
+        "manufacturing sites",
+        "distribution hubs",
+        "expected sum insured",
+        "coverage amount",
+        "registered address",
+        "not specified",
+    ]
+    low = token.lower()
+    if any(p in low for p in noise_phrases):
+        return ""
+    noise_words = {
+        "summarize", "attached", "broker", "submission", "document", "casualty", "manufacturing",
+        "distribution", "hub", "hubs", "site", "sites", "turnover", "insured", "coverage", "amount",
+    }
+    word_hits = sum(1 for w in re.findall(r"[A-Za-z]+", low) if w in noise_words)
+    if word_hits >= 2:
+        return ""
+    if not re.search(r"[A-Za-z]", token):
+        return ""
+    return token
+
+
 def _extract_geo_tokens(user_prompt: str, risk_profile: dict[str, Any] | None, broker_fields: dict[str, str] | None) -> list[str]:
     profile = risk_profile or {}
     fields = broker_fields or {}
-    text = " ".join(
-        [
-            str(user_prompt or ""),
-            str(profile.get("lob") or ""),
-            str(profile.get("sites") or ""),
-            str(profile.get("turnover") or ""),
-            str(fields.get("country") or ""),
-            str(fields.get("state") or ""),
-            str(fields.get("registered_address") or ""),
-        ]
-    )
-    candidates = re.findall(r"\b[A-Za-z][A-Za-z\s]{2,30}\b", text)
-    stop = {
-        "line of business", "not specified", "insurance", "risk", "submission",
-        "expected sum insured", "coverage amount", "registered address",
-    }
+
+    raw_values = [
+        str(fields.get("city") or ""),
+        str(fields.get("state") or ""),
+        str(fields.get("country") or ""),
+        str(profile.get("sites") or ""),
+        str(fields.get("registered_address") or ""),
+    ]
+
     tokens: list[str] = []
-    for c in candidates:
-        t = re.sub(r"\s+", " ", c).strip().lower()
-        if t in stop or len(t) < 3:
+    seen: set[str] = set()
+
+    for value in raw_values:
+        if not value:
             continue
-        if t not in tokens:
-            tokens.append(t)
-    return tokens[:12]
+        parts = re.split(r"[\n,;/|]+", value)
+        for part in parts:
+            cleaned = _clean_geo_candidate(part)
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(cleaned)
+
+    # Minimal fallback from prompt only when no structured location was extracted.
+    if not tokens and user_prompt:
+        prompt_candidates = re.findall(r"\b(?:in|at|across|from)\s+([A-Za-z][A-Za-z\s]{2,30})", user_prompt, flags=re.IGNORECASE)
+        for candidate in prompt_candidates:
+            cleaned = _clean_geo_candidate(candidate)
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(cleaned)
+
+    return tokens[:8]
+
+
+def _ensure_sentence(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return ""
+    if cleaned.endswith(("...", ".", "!", "?")):
+        return cleaned
+    return f"{cleaned}."
+
+
+def _normalize_complete_sentences(text: str, max_sentences: int = 5) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    if len(parts) == 1:
+        # Fallback split for fragment-style outputs.
+        parts = [p.strip() for p in re.split(r"\s*[;|]\s*", cleaned) if p.strip()]
+    sentences = [_ensure_sentence(p) for p in parts if p.strip()]
+    if not sentences:
+        return _ensure_sentence(cleaned)
+    return " ".join(sentences[:max_sentences])
 
 
 def _compute_web_geo_risk(
@@ -353,7 +426,8 @@ def _compute_web_geo_risk(
     low = f"{(web_summary or '')} {link_text}".lower()
     geo_tokens = _extract_geo_tokens(user_prompt, risk_profile, broker_fields)
     if "global" in (user_prompt or "").lower() or "international" in (user_prompt or "").lower():
-        geo_tokens.append("global")
+        if not any(str(t).strip().lower() == "global" for t in geo_tokens):
+            geo_tokens.append("Global")
 
     severe_markers = [
         "severe", "major", "critical", "high", "escalation", "active", "widespread", "persistent"
@@ -386,11 +460,11 @@ def _compute_web_geo_risk(
             points += 6.0
 
         score += points
-        drivers.append(f"{group.title()} signals: {', '.join(group_hits[:3])}")
+        drivers.append(_ensure_sentence(f"{group.title()} risk indicators were detected: {', '.join(group_hits[:3])}"))
 
     if geo_tokens:
         score += min(12.0, len(geo_tokens) * 1.2)
-        drivers.append(f"Geography analyzed: {', '.join(geo_tokens[:4])}")
+        drivers.append(_ensure_sentence(f"Geography analyzed for hazard context: {', '.join(geo_tokens[:4])}"))
 
     score = max(0.0, min(100.0, round(score, 2)))
     if score < WEB_RISK_BANDS["low_max"]:
@@ -401,14 +475,14 @@ def _compute_web_geo_risk(
         level = "HIGH"
 
     if not drivers:
-        drivers = ["No significant calamity/crime/strike indicators found in web summary."]
+        drivers = ["No significant calamity, crime, or strike indicators were found in the web summary."]
 
     return {
         "score": score,
         "level": level,
         "detected_hazards": detected,
         "geo_tokens": geo_tokens,
-        "drivers": drivers,
+        "drivers": [_ensure_sentence(d) for d in drivers],
     }
 
 
@@ -552,6 +626,24 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value).replace("'", "''")
+    return f"'{text}'"
+
+
+def _render_sql_with_params(sql: str, params: list[Any]) -> str:
+    rendered = str(sql or "")
+    for p in params:
+        rendered = rendered.replace("?", _sql_literal(p), 1)
+    return rendered
+
+
 def _extract_client_loss_ratio(
     user_prompt: str,
     broker_fields: dict[str, str] | None,
@@ -678,6 +770,40 @@ def _extract_client_incurred_per_year(
     return None, "not_found"
 
 
+def _extract_class_of_business(
+    user_prompt: str,
+    broker_text: str | None,
+) -> tuple[str | None, str]:
+    text = str(broker_text or "")
+    if text:
+        patterns = [
+            r"class\s*of\s*business\s*[:\-]\s*([^\n\r]{2,120})",
+            r"line\s*of\s*business\s*[:\-]\s*([^\n\r]{2,120})",
+            r"lob\s*[:\-]\s*([^\n\r]{2,120})",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, flags=re.IGNORECASE)
+            if not m:
+                continue
+            raw = _clean_value(m.group(1))
+            if not raw:
+                continue
+            # Keep first token-like phrase to avoid carrying trailing narrative text.
+            candidate = re.split(r"[.;|]", raw)[0].strip()
+            if candidate:
+                return candidate, "broker_submission"
+
+    inferred_from_doc = _infer_lob_hint(text)
+    if inferred_from_doc:
+        return inferred_from_doc, "broker_submission_inferred"
+
+    inferred_from_prompt = _infer_lob_hint(user_prompt or "")
+    if inferred_from_prompt:
+        return inferred_from_prompt, "user_prompt_inferred"
+
+    return None, "not_found"
+
+
 def _align_metric_scale(client_value: float, portfolio_series: pd.Series, ratio_mode: bool = False) -> float:
     """
     Align client scale to portfolio scale:
@@ -705,9 +831,12 @@ def _run_internal_sql(
     broker_text: str | None = None,
 ) -> tuple[str | None, pd.DataFrame | None]:
     broker_fields = broker_fields or {}
-    lob_hint = _infer_lob_hint(f"{user_prompt} {broker_fields.get('claims_history', '')}") or ""
+    extracted_cob, _ = _extract_class_of_business(user_prompt=user_prompt, broker_text=broker_text)
+    fallback_lob_hint = _infer_lob_hint(f"{user_prompt} {broker_fields.get('claims_history', '')}") or ""
+    lob_hint = extracted_cob or fallback_lob_hint
     db_path = _resolve_eoi_db_path()
     sql_query = ""
+    sql_query_display = ""
 
     try:
         conn = sqlite3.connect(str(db_path))
@@ -748,7 +877,7 @@ def _run_internal_sql(
             sql_query = f"SELECT {', '.join(select_parts)} FROM {table}"
             if filters:
                 sql_query += " WHERE " + " AND ".join(filters)
-
+            sql_query_display = _render_sql_with_params(sql_query, params)
             stats_df = pd.read_sql_query(sql_query, conn, params=params)
 
             def _load_distribution(metric_col: str) -> pd.Series:
@@ -770,7 +899,7 @@ def _run_internal_sql(
             conn.close()
 
         if stats_df.empty:
-            return sql_query, pd.DataFrame([{"Error": "No rows returned from underwriting_dataset."}])
+            return sql_query_display or sql_query, pd.DataFrame([{"Error": "No rows returned from underwriting_dataset."}])
 
         client_loss_ratio_raw, client_lr_source = _extract_client_loss_ratio(
             user_prompt=user_prompt,
@@ -834,7 +963,7 @@ def _run_internal_sql(
         stats_df["client_incurred_source"] = client_incurred_source
         stats_df["lob_hint"] = lob_hint or "Not inferred"
         stats_df["source_db"] = str(db_path)
-        return sql_query, stats_df
+        return sql_query_display or sql_query, stats_df
     except Exception as exc:
         # Keep backward compatibility by trying Vanna if direct DB benchmark fails.
         try:
@@ -1083,7 +1212,9 @@ def _build_geo_risk_prompt(user_prompt: str, risk_profile: dict[str, Any] | None
 
 def _run_geo_risk_search(user_prompt: str, risk_profile: dict[str, Any] | None, broker_fields: dict[str, str] | None) -> dict[str, Any]:
     geo_prompt = _build_geo_risk_prompt(user_prompt, risk_profile, broker_fields)
-    return _run_external_search(geo_prompt) | {"geo_prompt": geo_prompt}
+    out = _run_external_search(geo_prompt)
+    out["general_summary"] = _normalize_complete_sentences(str(out.get("general_summary") or ""), max_sentences=6)
+    return out | {"geo_prompt": geo_prompt}
 
 
 def _infer_lob_hint(text: str) -> str | None:
@@ -1203,6 +1334,72 @@ def _to_short_blurb(text: str, max_sentences: int = 2, max_chars: int = 280) -> 
     return blurb[:max_chars].rstrip()
 
 
+def _build_vanna_underwriter_summary(sql_result: pd.DataFrame | None) -> str:
+    if not isinstance(sql_result, pd.DataFrame) or sql_result.empty:
+        return "Internal portfolio benchmark is unavailable for this submission."
+    if "Error" in sql_result.columns:
+        err = str(sql_result.iloc[0].get("Error") or "SQL benchmark failed")
+        return _ensure_sentence(f"Internal portfolio benchmark could not be completed: {err}")
+
+    row = sql_result.fillna("").iloc[0].to_dict()
+    account_count = _to_float(row.get("account_count"))
+    lr_pctile = _to_float(row.get("loss_ratio_percentile"))
+    freq_pctile = _to_float(row.get("claims_frequency_percentile"))
+    sev_pctile = _to_float(row.get("severity_percentile"))
+    inc_pctile = _to_float(row.get("incurred_percentile"))
+    avg_lr = _to_float(row.get("avg_loss_ratio"))
+    avg_claim_freq = _to_float(row.get("avg_claims_frequency"))
+    avg_severity = _to_float(row.get("avg_largest_single_loss"))
+    avg_premium = _to_float(row.get("avg_ultimate_premium"))
+    avg_incurred = _to_float(row.get("avg_incurred_loss"))
+    client_freq = _to_float(row.get("client_claims_frequency"))
+    client_severity = _to_float(row.get("client_severity"))
+    client_incurred = _to_float(row.get("client_incurred_per_year"))
+
+    lines: list[str] = []
+    if account_count is not None and account_count > 0:
+        lines.append(_ensure_sentence(f"Portfolio benchmark considered approximately {int(account_count)} comparable records"))
+    if lr_pctile is not None:
+        lines.append(_ensure_sentence(f"Client loss ratio sits at the {lr_pctile:.1f} percentile versus portfolio peers, indicating {'higher' if lr_pctile >= 60 else 'lower' if lr_pctile <= 40 else 'mid-range'} relative loss performance"))
+    if freq_pctile is not None or sev_pctile is not None or inc_pctile is not None:
+        fp = f"{freq_pctile:.1f}" if freq_pctile is not None else "N/A"
+        sp = f"{sev_pctile:.1f}" if sev_pctile is not None else "N/A"
+        ip = f"{inc_pctile:.1f}" if inc_pctile is not None else "N/A"
+        lines.append(_ensure_sentence(f"Loss pattern percentiles are frequency {fp}, severity {sp}, and incurred trend {ip}"))
+
+    portfolio_terms: list[str] = []
+    if avg_premium is not None:
+        portfolio_terms.append(f"average ultimate premium {avg_premium:,.2f}")
+    if avg_incurred is not None:
+        portfolio_terms.append(f"average incurred loss {avg_incurred:,.2f}")
+    if avg_claim_freq is not None:
+        portfolio_terms.append(f"average claims frequency {avg_claim_freq:.2f}")
+    if avg_severity is not None:
+        portfolio_terms.append(f"average severity (largest single loss) {avg_severity:,.2f}")
+    if portfolio_terms:
+        lines.append(_ensure_sentence(f"Portfolio benchmark shows {', '.join(portfolio_terms)}"))
+
+    client_terms: list[str] = []
+    if client_incurred is not None:
+        client_terms.append(f"client incurred per year {client_incurred:,.2f}")
+    if client_freq is not None:
+        client_terms.append(f"client frequency {client_freq:.2f}")
+    if client_severity is not None:
+        client_terms.append(f"client severity {client_severity:,.2f}")
+    if client_terms:
+        lines.append(_ensure_sentence(f"Client-side extracted loss pattern indicates {', '.join(client_terms)}"))
+
+    peer_stats: list[str] = []
+    if avg_lr is not None:
+        peer_stats.append(f"average loss ratio {avg_lr:.2f}")
+    if peer_stats:
+        lines.append(_ensure_sentence(f"Peer benchmark shows {', '.join(peer_stats)}"))
+
+    if not lines:
+        return "Internal SQL output returned rows, but no benchmark metrics were available for underwriting interpretation."
+    return " ".join(lines[:4])
+
+
 def _build_executive_snapshot(
     user_prompt: str,
     doc_insights: str,
@@ -1226,7 +1423,7 @@ def _build_executive_snapshot(
     )
     web_summary_short = _to_short_blurb(web_summary or web_link_summaries or "No external web summary available.")
 
-    vanna_short = f"SQL used: {sql_query or 'Not available'}."
+    vanna_short = _build_vanna_underwriter_summary(sql_result)
     decision_payload = decision_payload or {}
     decision = str(decision_payload.get("decision") or "WRITE")
     risk_score = decision_payload.get("risk_score")

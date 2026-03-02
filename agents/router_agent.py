@@ -100,6 +100,7 @@ class RouterNode(Runnable):
         Examples include peer review, benchmarking, market positioning, or competitive ratios.
 
         Trigger words/phrases:
+        - "as compared to"
         - "industry benchmark"
         - "market average"
         - "how do we compare to..."
@@ -129,7 +130,7 @@ class RouterNode(Runnable):
             - "Can you summarize Projects in Sparta?"
 
     7. Choose "intranet" when:
-        - The user asks about policy documents, underwriting guidelines, claims guidelines, coverage terms, policy wording, exclusions, endorsements, EOI (Expression of Interest), broker submissions, or any insurance policy framework stored on Google Drive.
+        - The user asks about policy documents, rules and guidelines, R&G, underwriting guidelines, claims guidelines, coverage terms, policy wording, exclusions, endorsements, EOI (Expression of Interest), broker submissions, or any insurance policy framework stored on Google Drive.
         - The user uses terms like:
             - "guidelines"
             - "underwriting guidelines"

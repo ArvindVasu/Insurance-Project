@@ -259,21 +259,21 @@ if last_output:
 """
         st.markdown(snapshot_html, unsafe_allow_html=True)
 
-    st.markdown("### Risk Profile JSON")
-    st.json(
-        {
-            "lob": risk_profile.get("lob", "Not specified"),
-            "tiv": risk_profile.get("tiv", "Not specified"),
-            "turnover": risk_profile.get("turnover", "Not specified"),
-            "sites": risk_profile.get("sites", "Not specified"),
-        }
-    )
+    # st.markdown("### Risk Profile JSON")
+    # st.json(
+    #     {
+    #         "lob": risk_profile.get("lob", "Not specified"),
+    #         "tiv": risk_profile.get("tiv", "Not specified"),
+    #         "turnover": risk_profile.get("turnover", "Not specified"),
+    #         "sites": risk_profile.get("sites", "Not specified"),
+    #     }
+    # )
 
-    st.markdown("### Decision Engine")
-    st.write(f"Hard Rule Triggered: {'Yes' if hard_rule_triggered else 'No'}")
-    if hard_rules:
-        for idx, hr in enumerate(hard_rules, 1):
-            st.markdown(f"{idx}. {hr}")
+    # st.markdown("### Decision Engine")
+    # st.write(f"Hard Rule Triggered: {'Yes' if hard_rule_triggered else 'No'}")
+    # if hard_rules:
+    #     for idx, hr in enumerate(hard_rules, 1):
+    #         st.markdown(f"{idx}. {hr}")
 
     if web_risk:
         st.markdown("### Web Hazard Risk (Geo-Based)")
@@ -300,49 +300,49 @@ if last_output:
                 else:
                     st.markdown(f"**{idx}.** {item}")
 
-    if metric_scores:
-        st.markdown("### Normalization Layer (0-100)")
-        metric_order = [
-            "loss_quality_composite",
-            "loss_pattern_risk",
-            "revenue_scale_risk",
-            "geographic_spread_risk",
-            "risk_management_quality",
-            "external_risk",
-            "coverage_complexity",
-            "guideline_fit",
-        ]
-        ordered_metrics = [(k, metric_scores[k]) for k in metric_order if k in metric_scores]
-        ordered_metrics.extend([(k, v) for k, v in metric_scores.items() if k not in metric_order])
-        metric_df = pd.DataFrame(
-            [
-                {"Metric": _metric_label(k), "Normalized Score": v}
-                for k, v in ordered_metrics
-            ]
-        )
-        st.dataframe(metric_df, use_container_width=True, hide_index=True)
+    # if metric_scores:
+    #     st.markdown("### Normalization Layer (0-100)")
+    #     metric_order = [
+    #         "loss_quality_composite",
+    #         "loss_pattern_risk",
+    #         "revenue_scale_risk",
+    #         "geographic_spread_risk",
+    #         "risk_management_quality",
+    #         "external_risk",
+    #         "coverage_complexity",
+    #         "guideline_fit",
+    #     ]
+    #     ordered_metrics = [(k, metric_scores[k]) for k in metric_order if k in metric_scores]
+    #     ordered_metrics.extend([(k, v) for k, v in metric_scores.items() if k not in metric_order])
+    #     metric_df = pd.DataFrame(
+    #         [
+    #             {"Metric": _metric_label(k), "Normalized Score": v}
+    #             for k, v in ordered_metrics
+    #         ]
+    #     )
+    #     st.dataframe(metric_df, use_container_width=True, hide_index=True)
 
-    if weighted:
-        st.markdown("### Weighted Scoring Engine")
-        metric_order = [
-            "loss_quality_composite",
-            "loss_pattern_risk",
-            "revenue_scale_risk",
-            "geographic_spread_risk",
-            "risk_management_quality",
-            "external_risk",
-            "coverage_complexity",
-            "guideline_fit",
-        ]
-        ordered_weighted = [(k, weighted[k]) for k in metric_order if k in weighted]
-        ordered_weighted.extend([(k, v) for k, v in weighted.items() if k not in metric_order])
-        weighted_df = pd.DataFrame(
-            [
-                {"Metric": _metric_label(k), "Weighted Contribution": v}
-                for k, v in ordered_weighted
-            ]
-        ).sort_values("Weighted Contribution", ascending=False)
-        st.dataframe(weighted_df, use_container_width=True, hide_index=True)
+    # if weighted:
+    #     st.markdown("### Weighted Scoring Engine")
+    #     metric_order = [
+    #         "loss_quality_composite",
+    #         "loss_pattern_risk",
+    #         "revenue_scale_risk",
+    #         "geographic_spread_risk",
+    #         "risk_management_quality",
+    #         "external_risk",
+    #         "coverage_complexity",
+    #         "guideline_fit",
+    #     ]
+    #     ordered_weighted = [(k, weighted[k]) for k in metric_order if k in weighted]
+    #     ordered_weighted.extend([(k, v) for k, v in weighted.items() if k not in metric_order])
+    #     weighted_df = pd.DataFrame(
+    #         [
+    #             {"Metric": _metric_label(k), "Weighted Contribution": v}
+    #             for k, v in ordered_weighted
+    #         ]
+    #     ).sort_values("Weighted Contribution", ascending=False)
+    #     st.dataframe(weighted_df, use_container_width=True, hide_index=True)
 
     conditions = last_output.get("eoi_conditions") or []
     if conditions:
