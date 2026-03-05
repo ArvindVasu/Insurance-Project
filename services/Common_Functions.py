@@ -124,7 +124,20 @@ def _format_dataframe_for_display(result_obj):
             if "percentile" in col_lower:
                 formatted_df[col] = formatted_df[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "")
             elif "ratio" in col_lower:
-                formatted_df[col] = formatted_df[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notnull(x) else "")
+                # formatted_df[col] = formatted_df[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notnull(x) else "")
+                series = pd.to_numeric(formatted_df[col], errors="coerce")
+                non_null = series.dropna()
+                if non_null.empty:
+                    formatted_df[col] = formatted_df[col].apply(lambda x: "" if pd.isnull(x) else str(x))
+                else:
+                    # Heuristic:
+                    # - decimals (<=1.5 typical) -> convert to percent
+                    # - already percent scale (>1.5 typical) -> display as-is
+                    is_decimal_ratio = non_null.abs().median() <= 1.5
+                    if is_decimal_ratio:
+                        formatted_df[col] = series.apply(lambda x: f"{x * 100:.2f}%" if pd.notnull(x) else "")
+                    else:
+                        formatted_df[col] = series.apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "")                
             elif any(keyword in col_lower for keyword in money_keywords):
                 formatted_df[col] = formatted_df[col].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
         return formatted_df

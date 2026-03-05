@@ -26,25 +26,43 @@ qs_examples = "\n".join(
 
 
 documentation = """
-PnC_Data Table:
-- Reserve Class contains insurance business lines such as 'Property', 'Casualty', 'Marine', 'Motor', etc.
-- Exposure Year refers to the year in which the insured risk was exposed to potential loss.
-- RI Type identifies whether the record is 'Gross' or one of the reinsurance types such as 'Ceded - XOL', 'Ceded - QS', 'Ceded - CAP', 'Ceded - FAC', or 'Ceded - Others'.
-- Branch indicates the geographical business unit handling the contract, e.g., 'Europe', 'LATAM', 'North America'.
-- Loss Type captures the nature of the loss, and may be one of: 'ATT', 'CAT', 'LARGE', 'THREAT', or 'Disc'.
-- Underwriting Year represents the year in which the policy was underwritten or originated.
-- Incurred Loss represents the total loss incurred to date, including paid and case reserves.
-- Paid Loss is the portion of the Incurred Loss that has already been settled and paid out.
-- IBNR is calculated as the difference between Ultimate Loss and Incurred Loss.
-- Ultimate Loss is the projected final value of loss.
-- Ultimate Premium refers to the projected premium expected to be earned.
-- Loss Ratio is calculated as Ultimate Loss divided by Ultimate Premium.
-- AvE Incurred = Expected - Actual Incurred.
-- AvE Paid = Expected - Actual Paid.
-- Budget Premium is the forecasted premium for budgeting.
-- Budget Loss is the projected loss for budgeting.
-- Earned Premium is the portion of the premium that has been earned.
-- Case Reserves = Incurred Loss - Paid Loss.
+You are provided with the metadata summary of the ASTRA Underwriter PnC dataset.
+Use this information to understand column semantics when analyzing user queries.
+
+Column Definitions
+
+1. insured_name - Unique insured entity; used for entity-specific queries.
+
+2. insured_address - Business location; used for geography or jurisdiction-based queries.
+
+3. country_of_incorporation - Possible values: United States, Germany, Netherlands, France, United Kingdom, Singapore.
+Used for regulatory or jurisdictional analysis.
+
+4. business_description - Possible values: Food Processing, Oil & Gas Services, Construction Contractor, Electronics Manufacturing, Manufacturing, Retail & Distribution, Marine Shipping, Financial Advisory.
+Used for sector-based analysis.
+
+5. risk_type - Possible values: Marine Hull, Products Liability, General Liability, Industrial All Risks, Energy Offshore, Professional Indemnity.
+Used for coverage and risk categorization.
+
+6. broker_contact - Possible values: BMS Group, Gallagher London, Howden UK, Aon UK Ltd, Lockton Companies, WTW London, Marsh Ltd.
+Used for broker-level analysis.
+
+7. class_of_business - Possible values: Marine, Casualty, Products Liability, Property Damage & BI, Energy, Financial Lines.
+Used for portfolio segmentation.
+
+8. submission_date - Underwriting submission timeline; used for trend and pipeline analysis.
+
+9. claims_frequency - Discrete numeric values (0-6); used for frequency modelling.
+
+9. largest_single_loss - High-severity loss indicator.
+
+10. incurred_loss - Aggregate incurred loss metric.
+
+11. ultimate_premium - Final written premium; revenue metric.
+
+12. loss_ratio - Profitability indicator (ratio of loss to premium).
+
+13. total_insured_value (TIV) - Exposure metric representing insured value.
 """
 
 STATE_KEYS_SET_AT_ENTRY = []
@@ -54,23 +72,18 @@ STATE_KEYS_SET_AT_ENTRY = []
 class RouterNode(Runnable):
     def invoke(self, state: GraphState, config=None) -> GraphState:
         #doc_flag = "yes" if state['doc_loaded'] else "no"
-        excel_flag1 = "yes" if state.get("uploaded_file1_is_excel") else "no"
-        docx_flag1 = "yes" if state.get("uploaded_file1_is_docx") else "no"
-        doc1_exist = "yes" if state.get("uploaded_file1_path") else "no"
+        # excel_flag1 = "yes" if state.get("uploaded_file1_is_excel") else "no"
+        # docx_flag1 = "yes" if state.get("uploaded_file1_is_docx") else "no"
+        # doc1_exist = "yes" if state.get("uploaded_file1_path") else "no"
 
         schema = get_schema_description(DB_PATH)
 
         router_prompt = f"""
     You are an intelligent routing agent. Your job is to:
-    1. Choose one of the paths: "sql", "search", "comp", "faissdb", "document","intranet" based on the user prompt.
+    1. Choose one of the paths: "sql", "search", "comp", "faissdb","intranet" based on the user prompt.
 
-    2. Choose "document" if user has attached a document. User is asking to summarize or analyse it. Also, trying to fetch internal SQL data and external web insights.  
-    -ONLY one document should be uploaded in uploader2 and docx_flag2 should be yes.
-    -If the route is "multiA", DO NOT include vanna_prompt or fuzzy_prompt.
-    -Status for docx_flag1 = {docx_flag1}
-
-    3. Choose:
-    - "sql" if the user is asking a question about structured insurance data (e.g. claims, premiums, reserves, IBNR, trends, comparisons across years or products) or something that can be answered from the following database schema:
+    2. Choose:
+    - "sql" if the user is asking a question about structured insurance data (e.g. submissions, premiums, loss ratio, incurred loss, claims frequency, largest single loss, total insured value (TIV), broker performance, risk type, class of business, portfolio trends) or something that can be answered from the following database schema:
         {schema}
     - Use this additional documentation to better understand column meanings:
         {documentation}
@@ -79,7 +92,7 @@ class RouterNode(Runnable):
     - Make sure no document is attached
     -EVEN IF the user also says things like "plot", "draw", "visualize", "graph", "bar chart", etc. — that still means they want structured data **along with** a chart. SO route it to SQL
     -Route it to "sql" if queries includes the below mentioned:
-        - Asks for trends, breakdowns, or aggregations of internal metrics (e.g., IBNR, reserves, severity, premiums, earned/ultimate loss)
+        - Asks for trends, breakdowns, or aggregations of internal metrics (e.g., incurred loss, loss ratio, claims frequency, largest single loss, exposure (TIV), premiums, ultimate premium)
         - Ask for trends **within internal data only**
         - Compares **internal data over time or segments** (e.g., years, lines of business, regions)
         - Ask for charts or visualizations ("plot", "bar chart", etc.)
@@ -90,13 +103,13 @@ class RouterNode(Runnable):
         -vanna_prompt will be "Show me exposure year wise incurred loss".
         -Your work is to remove the noise and focus only on things that are required to generate sql query from vanna. SO remove all the extra stuffs out of the user prompt.
 
-    4. Choose "search" if:
+    3. Choose "search" if:
         - The user is asking about general or external information
         - Involves real-time info, news, global economic trends, regulations
         - The query cannot be answered by internal structured data or uploaded document
     - If the route is "search", DO NOT include vanna_prompt or fuzzy_prompt.
 
-    5. Choose "comp" when the user is comparing internal data against external data, competitors, or industry benchmarks. But no file should be attached.
+    4. Choose "comp" when the user is comparing internal data against external data, competitors, or industry benchmarks. But no file should be attached.
         Examples include peer review, benchmarking, market positioning, or competitive ratios.
 
         Trigger words/phrases:
@@ -121,7 +134,7 @@ class RouterNode(Runnable):
     -Do not include fuzzy_prompt
     -Only include relevant columns in vanna_prompt. Do not include ClaimNumber or ID columns unless the user specifically asks for them.
 
-    6. Choose "faissdb" when:
+    5. Choose "faissdb" when:
         - The prompt asks about the Sparta platform, Earmark Template, Branch Adjustment Template/Module, Projects in Sparta, or any internal process or documentation.
         - The user seems to be referring to internal workflows, operating processes, or knowledge base content.
         - Example prompts:
@@ -129,7 +142,7 @@ class RouterNode(Runnable):
             - "Explain how Earmark Template is used in our process."
             - "Can you summarize Projects in Sparta?"
 
-    7. Choose "intranet" when:
+    6. Choose "intranet" when:
         - The user asks about policy documents, rules and guidelines, R&G, underwriting guidelines, claims guidelines, coverage terms, policy wording, exclusions, endorsements, EOI (Expression of Interest), broker submissions, or any insurance policy framework stored on Google Drive.
         - The user uses terms like:
             - "guidelines"

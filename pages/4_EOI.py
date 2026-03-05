@@ -350,7 +350,7 @@ if last_output:
         for idx, cond in enumerate(conditions, start=1):
             st.markdown(f"{idx}. {cond}")
 
-    st.markdown("### Document Insights")
+    st.markdown("### Broker Submission Document Insights")
     st.markdown(last_output.get("eoi_doc_insights") or "No document insights generated.")
 
     if last_output.get("sql_query"):

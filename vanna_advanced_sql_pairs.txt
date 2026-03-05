@@ -1,36 +1,4 @@
 vn.train(
-    question="What is the average loss ratio by risk type?",
-    sql="""
-    SELECT risk_type,
-           AVG(loss_ratio) AS avg_loss_ratio
-    FROM underwriting_dataset
-    GROUP BY risk_type
-    ORDER BY avg_loss_ratio DESC;
-    """
-)
-
-vn.train(
-    question="Show total incurred loss by country.",
-    sql="""
-    SELECT country_of_incorporation,
-           SUM(incurred_loss) AS total_incurred
-    FROM underwriting_dataset
-    GROUP BY country_of_incorporation
-    ORDER BY total_incurred DESC;
-    """
-)
-
-vn.train(
-    question="Show top 10 accounts by largest single loss.",
-    sql="""
-    SELECT insured_name, largest_single_loss
-    FROM underwriting_dataset
-    ORDER BY largest_single_loss DESC
-    LIMIT 10;
-    """
-)
-
-vn.train(
     question="Which accounts have loss ratio above portfolio average?",
     sql="""
     SELECT insured_name, loss_ratio
@@ -42,47 +10,7 @@ vn.train(
     """
 )
 
-vn.train(
-    question="What is the average ultimate premium by class of business?",
-    sql="""
-    SELECT class_of_business,
-           AVG(ultimate_premium) AS avg_premium
-    FROM underwriting_dataset
-    GROUP BY class_of_business;
-    """
-)
 
-vn.train(
-    question="Show accounts with TIV above 100 million and loss ratio above 80%.",
-    sql="""
-    SELECT insured_name, tiv, loss_ratio
-    FROM underwriting_dataset
-    WHERE tiv > 100000000
-      AND loss_ratio > 80
-    ORDER BY loss_ratio DESC;
-    """
-)
-
-vn.train(
-    question="Which accounts have low claims frequency but high largest single loss?",
-    sql="""
-    SELECT insured_name, claims_frequency, largest_single_loss
-    FROM underwriting_dataset
-    WHERE claims_frequency <= 2
-      AND largest_single_loss > 1000000;
-    """
-)
-
-vn.train(
-    question="Summarize average largest loss and claims frequency by class.",
-    sql="""
-    SELECT class_of_business,
-           AVG(claims_frequency) AS avg_frequency,
-           AVG(largest_single_loss) AS avg_severity
-    FROM underwriting_dataset
-    GROUP BY class_of_business;
-    """
-)
 
 vn.train(
     question="What is the premium-weighted loss ratio of the portfolio?",
@@ -93,30 +21,7 @@ vn.train(
     """
 )
 
-vn.train(
-    question="Rank accounts by loss ratio within each class of business.",
-    sql="""
-    SELECT insured_name,
-           class_of_business,
-           loss_ratio,
-           RANK() OVER (
-               PARTITION BY class_of_business
-               ORDER BY loss_ratio DESC
-           ) AS rank_within_class
-    FROM underwriting_dataset;
-    """
-)
 
-vn.train(
-    question="What is the 75th percentile loss ratio by class?",
-    sql="""
-    SELECT class_of_business,
-           PERCENTILE_CONT(0.75) 
-           WITHIN GROUP (ORDER BY loss_ratio) AS p75_loss_ratio
-    FROM underwriting_dataset
-    GROUP BY class_of_business;
-    """
-)
 
 vn.train(
     question="Calculate 3-month moving average of premium.",
@@ -130,26 +35,7 @@ vn.train(
     """
 )
 
-vn.train(
-    question="Which risks have loss ratio greater than 100% and incurred loss above 1 million?",
-    sql="""
-    SELECT insured_name, loss_ratio, incurred_loss
-    FROM underwriting_dataset
-    WHERE loss_ratio > 100
-      AND incurred_loss > 1000000;
-    """
-)
 
-vn.train(
-    question="What is the average loss ratio by broker?",
-    sql="""
-    SELECT broker_contact,
-           AVG(loss_ratio) AS avg_loss_ratio
-    FROM underwriting_dataset
-    GROUP BY broker_contact
-    ORDER BY avg_loss_ratio DESC;
-    """
-)
 
 vn.train(
     question="Which broker generated the highest total premium?",
@@ -168,8 +54,8 @@ vn.train(
     sql="""
     SELECT insured_name,
            CASE
-               WHEN loss_ratio <= 50 THEN 'Low'
-               WHEN loss_ratio <= 80 THEN 'Medium'
+               WHEN loss_ratio <= 0.5 THEN 'Low'
+               WHEN loss_ratio <= 0.8 THEN 'Medium'
                ELSE 'High'
            END AS risk_band
     FROM underwriting_dataset;
@@ -182,8 +68,8 @@ vn.train(
     SELECT risk_band, COUNT(*)
     FROM (
         SELECT CASE
-                 WHEN loss_ratio <= 50 THEN 'Low'
-                 WHEN loss_ratio <= 80 THEN 'Medium'
+                 WHEN loss_ratio <= 0.5 THEN 'Low'
+                 WHEN loss_ratio <= 0.8 THEN 'Medium'
                  ELSE 'High'
                END AS risk_band
         FROM underwriting_dataset
@@ -192,19 +78,7 @@ vn.train(
     """
 )
 
-vn.train(
-    question="Show accounts performing worse than their class average.",
-    sql="""
-    SELECT u1.insured_name,
-           u1.class_of_business,
-           u1.loss_ratio
-    FROM underwriting_dataset u1
-    WHERE u1.loss_ratio >
-          (SELECT AVG(u2.loss_ratio)
-           FROM underwriting_dataset u2
-           WHERE u2.class_of_business = u1.class_of_business);
-    """
-)
+
 
 vn.train(
     question="Which accounts contribute to top 10% of premium volume?",
@@ -219,14 +93,6 @@ vn.train(
     """
 )
 
-vn.train(
-    question="What is the premium to TIV ratio for each account?",
-    sql="""
-    SELECT insured_name,
-           ultimate_premium / NULLIF(tiv,0) AS premium_to_tiv_ratio
-    FROM underwriting_dataset;
-    """
-)
 
 vn.train(
     question="Give overall portfolio summary statistics.",
@@ -239,17 +105,6 @@ vn.train(
     """
 )
 
-vn.train(
-    question="Which countries have the highest average loss ratio?",
-    sql="""
-    SELECT country_of_incorporation,
-           AVG(loss_ratio) AS avg_lr
-    FROM underwriting_dataset
-    GROUP BY country_of_incorporation
-    ORDER BY avg_lr DESC
-    LIMIT 5;
-    """
-)
 
 vn.train(
     question="Show accounts with claims frequency above 4 but largest loss below 200k.",
@@ -261,65 +116,7 @@ vn.train(
     """
 )
 
-vn.train(
-    question="Find accounts with unusually high loss ratio.",
-    sql="""
-    SELECT insured_name, loss_ratio
-    FROM underwriting_dataset
-    WHERE loss_ratio >
-        (SELECT AVG(loss_ratio) + 2 * STDDEV(loss_ratio)
-         FROM underwriting_dataset);
-    """
-)
 
-vn.train(
-    question="Show monthly average loss ratio trend.",
-    sql="""
-    SELECT DATE_TRUNC('month', submission_date) AS month,
-           AVG(loss_ratio) AS avg_loss_ratio
-    FROM underwriting_dataset
-    GROUP BY month
-    ORDER BY month;
-    """
-)
-
-vn.train(
-    question="Which accounts are in the worst 5 percent by loss ratio?",
-    sql="""
-    SELECT insured_name, loss_ratio
-    FROM underwriting_dataset
-    WHERE loss_ratio >= (
-        SELECT PERCENTILE_CONT(0.95)
-        WITHIN GROUP (ORDER BY loss_ratio)
-        FROM underwriting_dataset
-    );
-    """
-)
-
-vn.train(
-    question="What percentage of premium comes from top 5 accounts?",
-    sql="""
-    SELECT SUM(ultimate_premium) /
-           (SELECT SUM(ultimate_premium) FROM underwriting_dataset) * 100
-    FROM (
-        SELECT ultimate_premium
-        FROM underwriting_dataset
-        ORDER BY ultimate_premium DESC
-        LIMIT 5
-    ) top_accounts;
-    """
-)
-
-vn.train(
-    question="Show frequency and loss ratio side by side.",
-    sql="""
-    SELECT claims_frequency,
-           AVG(loss_ratio) AS avg_lr
-    FROM underwriting_dataset
-    GROUP BY claims_frequency
-    ORDER BY claims_frequency;
-    """
-)
 
 vn.train(
     question="Find risks with increasing premium but worsening loss ratio.",
@@ -330,18 +127,6 @@ vn.train(
         SELECT AVG(ultimate_premium)
         FROM underwriting_dataset
     )
-    AND loss_ratio > 80;
-    """
-)
-
-vn.train(
-    question="Show casualty accounts in UK with loss ratio above 70% and TIV above 50 million.",
-    sql="""
-    SELECT insured_name, loss_ratio, tiv
-    FROM underwriting_dataset
-    WHERE class_of_business = 'Casualty'
-      AND country_of_incorporation = 'United Kingdom'
-      AND loss_ratio > 70
-      AND tiv > 50000000;
+    AND loss_ratio > 0.8;
     """
 )
