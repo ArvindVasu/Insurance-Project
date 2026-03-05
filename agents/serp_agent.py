@@ -155,7 +155,7 @@ def serp_node(state: GraphState) -> GraphState:
 
     if sql_in_context:
         general_summary_prompt = f"""
-        You are an insurance and actuarial analyst comparing internal company data with external web results.
+        You are a Senior Underwriting Market Intelligence Analyst comparing internal underwriting performance with external market developments.
 
         Use the following INTERNAL SQL DATA ONLY FOR CONTEXT. **Do not include internal tables or numbers in your output.**
 
@@ -169,46 +169,62 @@ def serp_node(state: GraphState) -> GraphState:
 
         External snippets (numbered):
         {combined_text}
-        
+            
         User Prompt:
         "{ext_prompt}"
 
         🔽 Your Task:
         - Summarize **only what is found in the external data**
-        - DO NOT display the internal SQL data or repeat it
-        - Be concise, no more than **6-8 lines**
-        - Include **percentages, currency, loss ratios, IBNR**, and other KPIs found in the web
-        - Avoid repeating full articles or sentences
-        - Mention key **KPIs** (e.g., IBNR, premiums, loss ratios, reserves)
-        -Focus more on numerical insights
+        - DO NOT display internal SQL data
+        - Be concise (6–8 lines max)
+        - Focus on underwriting-relevant numerical metrics such as:
+            • Loss Ratios
+            • Rate changes / pricing trends
+            • Premium growth
+            • Claims frequency or severity trends
+            • Exposure growth
+            • Capacity changes
+            • Market hardening/softening
+        - Emphasize profitability, pricing adequacy, and market cycle signals
+        - Avoid repeating full sentences from snippets
+        - If no numerical metrics are found, state that clearly
 
         Output format:
-        1. 📌 Start with a summary of overall findings with around 5-6 lines.
-        2. 🔢 Then list 6–7 **quantitative highlights**.
-        3. 💬 End with any notable quote or number from a source if applicable.
-        4. Can include a table with numerical insights as well, but not the internal data or tabular data. Only if you found it in external data.
+        1. 📌 5–6 line executive summary of market findings.
+        2. 🔢 5–7 quantitative highlights (USD, %, ratios, YoY change).
+        3. 💬 One notable market insight impacting underwriting strategy.
+        4. Optional small table ONLY if derived from external data (never internal).
         """
     else:
         general_summary_prompt = f"""
-        Your task is to extract **concise and numerically rich insights** from the following web snippets, in response to this user query:
+        You are a Senior Underwriting Market Analyst.
+
+        Your task is to extract concise, numerically rich underwriting insights from the following web snippets in response to:
 
         "{state['user_prompt']}"
 
         External snippets (numbered):
         {combined_text}
 
-       Your summary should:
-        - Be structured and no more than **10–12 lines**
-        - Include **percentages**, **currency values**, **ratios**, **dates**, and **growth trends**
-        - Mention key **KPIs** (e.g., IBNR, premiums, loss ratios, reserves)
-        - Avoid repeating the snippets. Instead, **synthesize them**
-        - If no numbers are found, say so explicitly
+        Your summary should:
+        - Be structured and no more than 10–12 lines
+        - Focus on underwriting market intelligence
+        - Include percentages, USD values, ratios, dates, and growth trends
+        - Highlight:
+            • Loss ratio benchmarks
+            • Rate movement (hardening/softening)
+            • Premium growth
+            • Capacity expansion or contraction
+            • Claims inflation / severity trends
+            • Regulatory or capital pressures
+        - Avoid copying snippets verbatim — synthesize them
+        - If no numeric data is found, say so explicitly
 
         Output format:
-        1. 📌 Start with a summary of overall findings with around 5-6 lines.
-        2. 🔢 Then list 3–4 **quantitative highlights**.
-        3. 💬 End with any notable quote or number from a source if applicable.
-        4. Can include a table with numerical insights as well
+        1. 📌 5–6 line executive summary.
+        2. 🔢 3–5 quantitative underwriting highlights.
+        3. 💬 One key strategic implication for underwriters.
+        4. Optional compact table if numerical insights are available.
         """
 
     general_summary = call_llm(general_summary_prompt).strip()

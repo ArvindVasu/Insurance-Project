@@ -55,6 +55,36 @@ def _get_vn_model():
     vn_model = vanna_configure()
     return vn_model
 
+
+def _normalize_loss_ratio_thresholds(sql_query: str) -> str:
+    """
+    Normalize loss_ratio filter thresholds to match DB scale (0-1).
+    If model generates percent-like thresholds (e.g. > 75), convert to > 0.75.
+    """
+    if not isinstance(sql_query, str):
+        return sql_query
+
+    pattern = re.compile(
+        r'(\bloss_ratio\b\s*(?:>=|<=|=|>|<)\s*)([-+]?\d+(?:\.\d+)?)',
+        flags=re.IGNORECASE,
+    )
+
+    def _replace(match: re.Match) -> str:
+        prefix = match.group(1)
+        raw_val = match.group(2)
+        try:
+            val = float(raw_val)
+        except ValueError:
+            return match.group(0)
+
+        # DB stores ratios as decimals, e.g. 0.75 for 75%.
+        if abs(val) > 1.5:
+            normalized = val / 100.0
+            return f"{prefix}{normalized:.6f}".rstrip("0").rstrip(".")
+        return match.group(0)
+
+    return pattern.sub(_replace, sql_query)
+
 # ---- Vanna SQL Node ----
 
 def get_user_chart_type(prompt: str) -> Optional[str]:
@@ -137,7 +167,7 @@ def vanna_node(state: GraphState) -> GraphState:
     # Use user_prompt if vanna_prompt is not available
 
     schema_desc = get_schema_description(DB_PATH)
-    raw_prompt = state["user_prompt"]
+    raw_prompt = state.get("vanna_prompt") or state["user_prompt"]
 
     # Build a strict instruction block to prevent introspection
     instruction_block = (
@@ -152,6 +182,7 @@ def vanna_node(state: GraphState) -> GraphState:
     try:
         vn = _get_vn_model()
         sql_query = vn.generate_sql(combined_prompt)
+        sql_query = _normalize_loss_ratio_thresholds(sql_query)
     except Exception as e:
         return {
             **prune_state(state, STATE_KEYS_SET_AT_ENTRY),

@@ -344,13 +344,7 @@ if last_output:
     #     ).sort_values("Weighted Contribution", ascending=False)
     #     st.dataframe(weighted_df, use_container_width=True, hide_index=True)
 
-    conditions = last_output.get("eoi_conditions") or []
-    if conditions:
-        st.markdown("### Conditions")
-        for idx, cond in enumerate(conditions, start=1):
-            st.markdown(f"{idx}. {cond}")
-
-    st.markdown("### Document Insights")
+    st.markdown("### Broker Submission Document Insights")
     st.markdown(last_output.get("eoi_doc_insights") or "No document insights generated.")
 
     if last_output.get("sql_query"):
@@ -401,6 +395,13 @@ if last_output:
                     st.markdown(f"**{idx}.** {fname}")
             else:
                 st.markdown(f"**{idx}.** {src}")
+
+    conditions = last_output.get("eoi_conditions") or []
+    if conditions:
+        st.markdown("### Conditions")
+        for idx, cond in enumerate(conditions, start=1):
+            st.markdown(f"{idx}. {cond}")
+
 
 if st.session_state.eoi_generated_doc and st.session_state.eoi_show_download_dialog:
     if hasattr(st, "dialog"):

@@ -2,53 +2,69 @@ import sqlite3
 from pathlib import Path
 
 # Use the correct path to your DB file in Drive
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-db_path = PROJECT_ROOT / "Underwriter_Data.db"
+# PROJECT_ROOT = Path(__file__).resolve().parent
+#print(PROJECT_ROOT)
+# db_path = PROJECT_ROOT / "Underwriter_data.db"
 
 import vanna as vn
 from vanna.remote import VannaDefault
 import os
 from dotenv import load_dotenv
+# from vanna.openai import OpenAI_Chat
+# from vanna.local import LocalVanna
 
 load_dotenv()
 vanna_api_key = os.getenv("vanna_api_key")
 vanna_model_name = os.getenv("vanna_model_name")
-
+openai_api_key = os.getenv("OPENAI_API_KEY")
 # print(vanna_api_key)
 # print(vanna_model_name)
 
-vn = VannaDefault(model=vanna_model_name, api_key=vanna_api_key)
-vn.connect_to_sqlite(str(db_path))
-vn.allow_llm_to_see_data = True
+# vn = VannaDefault(model=vanna_model_name, api_key=vanna_api_key)
+# vn_model.connect_to_sqlite(f"sqlite:///{db_path}")
+# vn_model.allow_llm_to_see_data = True
+vn_model = VannaDefault(model=vanna_model_name, api_key=vanna_api_key)
+vn_model.connect_to_sqlite('/Users/hp/OneDrive/Desktop/Python/SQLITE/Underwriter_data/Underwriter_data.db')
+
+# class MyVanna(LocalVanna, OpenAI_Chat):
+#     pass
+
+# vn = MyVanna(config={
+#     "api_key": openai_api_key,
+#     "model": "gpt-3.5-turbo",
+#     "model_name": vanna_model_name
+# })
+
+# vn_model.connect_to_sqlite("Underwriter_data.db")
 
 # import streamlit as st
 # st.write(db_path)
-# st.write(vn.ask("Show me loss ratio for casualty insuarnce"))
+# st.write(vn_model.ask("Show me loss ratio for casualty insuarnce"))
 
-# vn.ask("Show me loss ratio for casualty insuarnce")
-# print(vn.ask("Show me loss ratio for casualty insuarnce"))
+# vn_model.ask("Show me loss ratio for casualty insuarnce")
+# print(vn_model.ask("Show me loss ratio for casualty insuarnce"))
 
 # Example: training Vanna with your underwriting table
-vn.train(ddl="""
-CREATE TABLE underwriting_dataset (
-	insured_name TEXT,
-	insured_address TEXT,
-    country_of_incorporation TEXT,
-    business_description TEXT,
-    risk_type TEXT,
-	broker_contact TEXT,
-	class_of_business TEXT,
-	submission_date DATE,
-    claims_frequency INT,
-    largest_single_loss FLOAT,
-    incurred_loss FLOAT,
-    ultimate_premium FLOAT,
-    loss_ratio FLOAT,
-    tiv FLOAT 
+vn_model.train(ddl="""
+CREATE TABLE "underwriting_dataset" (
+	"insured name"	TEXT,
+	"insured address"	TEXT,
+	"country of incorporation"	TEXT,
+	"business description"	TEXT,
+	"risk type"	TEXT,
+	"broker contact"	TEXT,
+	"class of business"	TEXT,
+	"submission date"	TEXT,
+	"claims frequency"	INTEGER,
+	"Largest single loss"	INTEGER,
+	"incurred Loss"	INTEGER,
+	"Ultimate Premium"	INTEGER,
+	"Loss Ratio"	REAL,
+	"total Insured Value (TIV)"	INTEGER
 );
 """)
 
-vn.train(documentation="""
+vn_model.train(documentation="""
 
 Underwriting_Dataset Table Documentation
 =========================================
@@ -62,7 +78,7 @@ Core Loss & Performance Metrics
 
 - claims_frequency:
   Represents the total number of reported claims for the insured account
-  within the defined observation period (typically 3–5 years).
+  within the defined observation period (typically 3-5 years).
   Used to assess frequency-driven risk behavior.
 
 - largest_single_loss:
@@ -167,7 +183,7 @@ Derived / Analytical Metrics
 - Risk Band Classification:
   Suggested segmentation based on loss_ratio:
       <= 50%   → Low Risk
-      50–80%   → Medium Risk
+      50-80%   → Medium Risk
       > 80%    → High Risk
 
 - Case Reserve Proxy:
@@ -181,10 +197,10 @@ Underwriting Interpretation Guidelines
 - Loss Ratio < 60%:
   Generally attractive risk, subject to trend stability.
 
-- Loss Ratio 60–80%:
+- Loss Ratio 60-80%:
   Acceptable but requires pricing discipline.
 
-- Loss Ratio 80–100%:
+- Loss Ratio 80-100%:
   Marginal; requires loading, deductible adjustment, or referral.
 
 - Loss Ratio > 100%:
@@ -229,7 +245,7 @@ but must consider:
 
 # Question SQL Pairs
 
-vn.train(
+vn_model.train(
     question="What is the average loss ratio by risk type?",
     sql="""
     SELECT risk_type,
@@ -240,7 +256,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show total incurred loss by country.",
     sql="""
     SELECT country_of_incorporation,
@@ -251,7 +267,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show top 10 accounts by largest single loss.",
     sql="""
     SELECT insured_name, largest_single_loss
@@ -261,7 +277,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Which accounts have loss ratio above portfolio average?",
     sql="""
     SELECT insured_name, loss_ratio
@@ -273,7 +289,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="What is the average ultimate premium by class of business?",
     sql="""
     SELECT class_of_business,
@@ -283,18 +299,18 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show accounts with TIV above 100 million and loss ratio above 80%.",
     sql="""
     SELECT insured_name, tiv, loss_ratio
     FROM underwriting_dataset
     WHERE tiv > 100000000
-      AND loss_ratio > 80
+      AND loss_ratio > 0.8
     ORDER BY loss_ratio DESC;
     """
 )
 
-vn.train(
+vn_model.train(
     question="Which accounts have low claims frequency but high largest single loss?",
     sql="""
     SELECT insured_name, claims_frequency, largest_single_loss
@@ -304,7 +320,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Summarize average largest loss and claims frequency by class.",
     sql="""
     SELECT class_of_business,
@@ -315,7 +331,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="What is the premium-weighted loss ratio of the portfolio?",
     sql="""
     SELECT 
@@ -324,7 +340,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Rank accounts by loss ratio within each class of business.",
     sql="""
     SELECT insured_name,
@@ -338,7 +354,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="What is the 75th percentile loss ratio by class?",
     sql="""
     SELECT class_of_business,
@@ -349,7 +365,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Calculate 3-month moving average of premium.",
     sql="""
     SELECT submission_date,
@@ -361,17 +377,17 @@ vn.train(
     """
 )
 
-vn.train(
-    question="Which risks have loss ratio greater than 100% and incurred loss above 1 million?",
+vn_model.train(
+    question="Which risks have loss ratio greater than 90% and incurred loss above 1 million?",
     sql="""
     SELECT insured_name, loss_ratio, incurred_loss
     FROM underwriting_dataset
-    WHERE loss_ratio > 100
+    WHERE loss_ratio > 0.9
       AND incurred_loss > 1000000;
     """
 )
 
-vn.train(
+vn_model.train(
     question="What is the average loss ratio by broker?",
     sql="""
     SELECT broker_contact,
@@ -382,7 +398,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Which broker generated the highest total premium?",
     sql="""
     SELECT broker_contact,
@@ -394,27 +410,27 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Classify risks into Low, Medium and High risk based on loss ratio.",
     sql="""
     SELECT insured_name,
            CASE
-               WHEN loss_ratio <= 50 THEN 'Low'
-               WHEN loss_ratio <= 80 THEN 'Medium'
+               WHEN loss_ratio <= 0.5 THEN 'Low'
+               WHEN loss_ratio <= 0.8 THEN 'Medium'
                ELSE 'High'
            END AS risk_band
     FROM underwriting_dataset;
     """
 )
 
-vn.train(
+vn_model.train(
     question="How many risks fall into each loss ratio band?",
     sql="""
     SELECT risk_band, COUNT(*)
     FROM (
         SELECT CASE
-                 WHEN loss_ratio <= 50 THEN 'Low'
-                 WHEN loss_ratio <= 80 THEN 'Medium'
+                 WHEN loss_ratio <= 0.5 THEN 'Low'
+                 WHEN loss_ratio <= 0.8 THEN 'Medium'
                  ELSE 'High'
                END AS risk_band
         FROM underwriting_dataset
@@ -423,7 +439,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show accounts performing worse than their class average.",
     sql="""
     SELECT u1.insured_name,
@@ -437,7 +453,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Which accounts contribute to top 10% of premium volume?",
     sql="""
     SELECT insured_name, ultimate_premium
@@ -450,7 +466,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="What is the premium to TIV ratio for each account?",
     sql="""
     SELECT insured_name,
@@ -459,7 +475,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Give overall portfolio summary statistics.",
     sql="""
     SELECT COUNT(*) AS total_accounts,
@@ -470,7 +486,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Which countries have the highest average loss ratio?",
     sql="""
     SELECT country_of_incorporation,
@@ -482,7 +498,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show accounts with claims frequency above 4 but largest loss below 200k.",
     sql="""
     SELECT insured_name
@@ -492,7 +508,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Find accounts with unusually high loss ratio.",
     sql="""
     SELECT insured_name, loss_ratio
@@ -503,7 +519,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show monthly average loss ratio trend.",
     sql="""
     SELECT DATE_TRUNC('month', submission_date) AS month,
@@ -514,7 +530,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Which accounts are in the worst 5 percent by loss ratio?",
     sql="""
     SELECT insured_name, loss_ratio
@@ -527,7 +543,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="What percentage of premium comes from top 5 accounts?",
     sql="""
     SELECT SUM(ultimate_premium) /
@@ -541,7 +557,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show frequency and loss ratio side by side.",
     sql="""
     SELECT claims_frequency,
@@ -552,7 +568,7 @@ vn.train(
     """
 )
 
-vn.train(
+vn_model.train(
     question="Find risks with increasing premium but worsening loss ratio.",
     sql="""
     SELECT insured_name, ultimate_premium, loss_ratio
@@ -561,18 +577,20 @@ vn.train(
         SELECT AVG(ultimate_premium)
         FROM underwriting_dataset
     )
-    AND loss_ratio > 80;
+    AND loss_ratio > 0.8;
     """
 )
 
-vn.train(
+vn_model.train(
     question="Show casualty accounts in UK with loss ratio above 70% and TIV above 50 million.",
     sql="""
     SELECT insured_name, loss_ratio, tiv
     FROM underwriting_dataset
     WHERE class_of_business = 'Casualty'
       AND country_of_incorporation = 'United Kingdom'
-      AND loss_ratio > 70
+      AND loss_ratio > 0.7
       AND tiv > 50000000;
     """
 )
+
+#print(vn_model.get_training_data())

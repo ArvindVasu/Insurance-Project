@@ -86,26 +86,71 @@ def comp_node(state: GraphState) -> GraphState:
     external_summary = serp_result.get("general_summary", "")
 
     # 3) COMPARISON: clear separation + citations
+    # comparison_prompt = f"""
+    # You are an Benchmarking actuarial analyst. Compare OUR internal IBNR trend to EXTERNAL market/industry benchmarks.
+    # Rules:
+    # - Use INTERNAL SQL only for our numbers; do NOT infer market values from internal data.
+    # - Use EXTERNAL WEB snippets only for market/industry values; if no numeric market average is found, say so explicitly.
+    # - Put all money in **USD**, include **%/ratios/dates** where present.
+    # - Append [i] citations for any external metric where i refers to the snippet index (shown below).
+    # - If sources disagree, note the discrepancy briefly.
+
+    # Your job is to:
+    # 1. Analyze differences, similarities, and gaps between internal company data and external web sources.
+    # 2. Focus heavily on **numerical metrics** such as:
+    # - IBNR, Incurred Loss, Ultimate Loss
+    # - Premiums, Loss Ratios
+    # - Exposure Years, Percent changes
+
+    # 3. Focus more on:
+    # - Trends (increases/decreases)
+    # - Matching vs. diverging figures
+    # - Numerical differences or % differences
+
+    # Our internal (context only; do not reveal raw table):
+    # SQL: {sql_query}
+    # Top rows (context only):
+    # {sql_df.head(5).to_markdown(index=False) if isinstance(sql_df, pd.DataFrame) else str(sql_df)}
+
+    # External snippets (numbered):
+    # {chr(10).join([f"[{i+1}] {s}" for i, (_, s) in enumerate(web_links)])}
+
+    # Task:
+    # 1) 5–7 lines overview (internal vs market).
+    # 2) 3–5 bullets with side-by-side contrasts (Our vs Market) using USD/%/ratios and [citation] only for external numbers.
+    # 3) 1 “watch item” (e.g., social inflation, rate adequacy, reserving pressure) if relevant.
+
+    # General external synthesis to leverage (do not copy verbatim; keep citations): 
+    # {external_summary}
+    # """
+
     comparison_prompt = f"""
-    You are an Benchmarking actuarial analyst. Compare OUR internal IBNR trend to EXTERNAL market/industry benchmarks.
+    You are a Senior Underwriting Benchmark Analyst. Compare OUR internal underwriting performance to EXTERNAL market/industry benchmarks.
+
     Rules:
     - Use INTERNAL SQL only for our numbers; do NOT infer market values from internal data.
     - Use EXTERNAL WEB snippets only for market/industry values; if no numeric market average is found, say so explicitly.
     - Put all money in **USD**, include **%/ratios/dates** where present.
     - Append [i] citations for any external metric where i refers to the snippet index (shown below).
-    - If sources disagree, note the discrepancy briefly.
+    - If sources disagree, briefly note discrepancies.
 
     Your job is to:
-    1. Analyze differences, similarities, and gaps between internal company data and external web sources.
-    2. Focus heavily on **numerical metrics** such as:
-    - IBNR, Incurred Loss, Ultimate Loss
-    - Premiums, Loss Ratios
-    - Exposure Years, Percent changes
+    1. Analyze differences, similarities, and performance gaps between internal underwriting data and external market benchmarks.
+    2. Focus heavily on **numerical underwriting metrics**, such as:
+    - Loss Ratio
+    - Incurred Loss
+    - Ultimate Premium
+    - Claims Frequency
+    - Largest Single Loss
+    - Total Insured Value (TIV)
+    - Rate change / pricing trend (if available)
 
-    3. Focus more on:
-    - Trends (increases/decreases)
-    - Matching vs. diverging figures
-    - Numerical differences or % differences
+    3. Emphasize:
+    - Profitability gaps (Loss Ratio vs Market)
+    - Pricing adequacy vs market cycle
+    - Trend movements (hardening/softening)
+    - Exposure growth vs premium growth
+    - Frequency vs severity dynamics
 
     Our internal (context only; do not reveal raw table):
     SQL: {sql_query}
@@ -116,11 +161,12 @@ def comp_node(state: GraphState) -> GraphState:
     {chr(10).join([f"[{i+1}] {s}" for i, (_, s) in enumerate(web_links)])}
 
     Task:
-    1) 5–7 lines overview (internal vs market).
-    2) 3–5 bullets with side-by-side contrasts (Our vs Market) using USD/%/ratios and [citation] only for external numbers.
-    3) 1 “watch item” (e.g., social inflation, rate adequacy, reserving pressure) if relevant.
+    1) Provide a 5–7 line executive overview (Internal vs Market).
+    2) Provide 3–5 bullet contrasts formatted as:
+    - Our Metric vs Market Metric ([citation] only for external numbers)
+    3) Provide 1 “Underwriting Watch Item” (e.g., rate adequacy pressure, broker concentration risk, loss deterioration, severity spike, exposure concentration).
 
-    General external synthesis to leverage (do not copy verbatim; keep citations): 
+    General external synthesis to leverage (do not copy verbatim; keep citations):
     {external_summary}
     """
     comparison_summary = call_llm(comparison_prompt).strip()
