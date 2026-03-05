@@ -2309,6 +2309,12 @@ def _iter_all_paragraphs(doc: Document):
                     yield p
 
 
+def _enforce_calibri_font(doc: Document) -> None:
+    for p in _iter_all_paragraphs(doc):
+        for r in p.runs:
+            r.font.name = "Calibri"
+
+
 def _set_paragraph_text_preserve_format(p, text: str, force_bold: bool | None = None) -> None:
     if not p.runs:
         run = p.add_run("")
@@ -2317,6 +2323,10 @@ def _set_paragraph_text_preserve_format(p, text: str, force_bold: bool | None = 
     p.runs[0].text = text
     if force_bold is not None:
         p.runs[0].bold = force_bold
+    # Keep non-heading/body lines visually consistent even if template paragraph style varies.
+    if force_bold is False:
+        p.runs[0].font.name = "Calibri"
+        p.runs[0].font.size = Pt(11)
     for r in p.runs[1:]:
         r.text = ""
 
@@ -2434,14 +2444,55 @@ def _sql_dataframe_for_doc_table(df: pd.DataFrame | None, max_rows: int = 5) -> 
     if not isinstance(df, pd.DataFrame) or df.empty or "Error" in df.columns:
         return ["Status"], [["No structured SQL output available."]]
 
+    def _pretty_sql_col(col: str) -> str:
+        overrides = {
+            "account_count": "Account Count",
+            "avg_loss_ratio": "Avg Loss Ratio",
+            "avg_claims_frequency": "Avg Claims Frequency",
+            "avg_largest_single_loss": "Avg Largest Single Loss",
+            "avg_ultimate_premium": "Avg Ultimate Premium",
+            "avg_incurred_loss": "Avg Incurred Loss",
+            "loss_ratio_percentile": "Loss Ratio Percentile",
+            "claims_frequency_percentile": "Claims Frequency Percentile",
+            "severity_percentile": "Severity Percentile",
+            "incurred_percentile": "Incurred Percentile",
+            "client_loss_ratio": "Client Loss Ratio",
+            "client_claims_frequency": "Client Claims Frequency",
+            "client_severity": "Client Severity",
+            "client_incurred_per_year": "Client Incurred Per Year",
+        }
+        key = str(col).strip().lower()
+        return overrides.get(key, str(col).replace("_", " ").title())
+
+    def _format_sql_cell(col: str, value: Any) -> str:
+        if value is None or str(value).strip() == "":
+            return ""
+        txt = str(value).strip()
+        num = _to_float(value)
+        if num is None:
+            return txt
+
+        col_low = str(col).lower()
+        money_keys = ("premium", "incurred", "loss", "limit", "tiv", "turnover")
+        if "percentile" in col_low:
+            return f"{num:.2f}"
+        if "ratio" in col_low:
+            pct = num * 100.0 if 0 <= num <= 1 else num
+            return f"{pct:.2f}%"
+        if any(k in col_low for k in money_keys):
+            return f"{num:,.2f}"
+        if abs(num - round(num)) < 1e-9:
+            return f"{int(round(num))}"
+        return f"{num:.2f}"
+
     keep_cols = [c for c in df.columns if str(c).strip().lower() not in SQL_HIDDEN_OUTPUT_COLUMNS]
     view = df[keep_cols].head(max_rows).fillna("").copy() if keep_cols else pd.DataFrame()
     if view.empty:
         return ["Status"], [["No structured SQL output available."]]
-    headers = [str(c) for c in view.columns]
+    headers = [_pretty_sql_col(str(c)) for c in view.columns]
     rows: list[list[str]] = []
     for _, row in view.iterrows():
-        rows.append([str(row[c]).replace("\n", " ").strip() for c in view.columns])
+        rows.append([_format_sql_cell(str(c), row[c]) for c in view.columns])
     return headers, rows
 
 
@@ -2462,12 +2513,19 @@ def _insert_table_after_paragraph(doc: Document, paragraph, headers: list[str], 
         for p in table.cell(0, idx).paragraphs:
             for r in p.runs:
                 r.bold = True
+                r.font.name = "Calibri"
+                r.font.size = Pt(10)
 
     if rows:
         for r_idx, row in enumerate(rows, start=1):
             for c_idx in range(col_count):
                 val = row[c_idx] if c_idx < len(row) else ""
                 table.cell(r_idx, c_idx).text = str(val)
+                for p in table.cell(r_idx, c_idx).paragraphs:
+                    for r in p.runs:
+                        r.bold = False
+                        r.font.name = "Calibri"
+                        r.font.size = Pt(10)
     else:
         table.cell(1, 0).text = "No structured SQL output available."
 
@@ -2561,11 +2619,23 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
     _replace_prefixed_line(doc, "Proposed Retention: ", proposed_retention)
     _replace_prefixed_line(doc, "Territory: ", str(territory))
 
-    sql_headers, sql_rows = _sql_dataframe_for_doc_table(sql_result, max_rows=5)
+    sql_headers, sql_rows = _sql_dataframe_for_doc_table(sql_result, max_rows=8)
 
-    doc_agent_full = str(eoi_state.get("eoi_doc_insights") or "Not available.").strip()
-    if len(doc_agent_full) > 1800:
-        doc_agent_full = doc_agent_full[:1800].rstrip() + "..."
+    doc_agent_full = _llm_exec_summary(
+        "Document Agent",
+        str(eoi_state.get("eoi_doc_insights") or "Not available.").strip(),
+        user_prompt,
+    ).replace("\n", " ")
+    web_agent_short = _llm_exec_summary(
+        "Web Agent",
+        str(eoi_state.get("general_summary") or "Not available.").strip(),
+        user_prompt,
+    ).replace("\n", " ")
+    intranet_agent_short = _llm_exec_summary(
+        "Intranet Agent",
+        str(eoi_state.get("intranet_summary") or "Not available.").strip(),
+        user_prompt,
+    ).replace("\n", " ")
 
     geo_tokens = web_risk.get("geo_tokens") or []
     detected = web_risk.get("detected_hazards") or {}
@@ -2584,8 +2654,8 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
         "SQL Agent Output (Top Rows):",
     ]
     ai_lines.extend([
-        f"Web Agent: {_to_short_blurb(eoi_state.get('general_summary') or 'Not available.', max_sentences=2, max_chars=300)}",
-        f"Intranet Agent: {_to_short_blurb(eoi_state.get('intranet_summary') or 'Not available.', max_sentences=2, max_chars=300)}",
+        f"Web Agent: {web_agent_short}",
+        f"Intranet Agent: {intranet_agent_short}",
     ])
     if hard_rules:
         ai_lines.append(f"Hard Rule Hits: {'; '.join(hard_rules)}.")
@@ -2609,6 +2679,7 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
         doc.add_paragraph("Authorized Signature: ____________________")
         doc.add_paragraph("Name: ____________________")
         doc.add_paragraph(f"Date: {_today_str()}")
+    _enforce_calibri_font(doc)
 
     buffer = io.BytesIO()
     doc.save(buffer)
