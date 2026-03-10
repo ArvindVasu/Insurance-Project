@@ -11,9 +11,15 @@ class GraphState(TypedDict, total=False):
 
     # Uploaded document
     uploaded_file1: Any
+    uploaded_file1_name: str | None
     uploaded_file1_path: str | None
     uploaded_file1_is_excel: bool
     uploaded_file1_is_docx: bool
+    uploaded_file2: Any
+    uploaded_file2_name: str | None
+    uploaded_file2_path: str | None
+    uploaded_file2_is_excel: bool
+    uploaded_file2_is_docx: bool
 
     # Routing
     route: str | None
@@ -29,6 +35,10 @@ class GraphState(TypedDict, total=False):
     chart_info: dict | None
     comparison_summary: str | None
     general_summary: str | None
+    document_compare_preview_1: pd.DataFrame | None
+    document_compare_preview_2: pd.DataFrame | None
+    document_compare_name_1: str | None
+    document_compare_name_2: str | None
 
     # FAISS
     faiss_summary: str | None

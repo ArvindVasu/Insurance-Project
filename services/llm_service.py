@@ -55,15 +55,19 @@ import logging
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a precise AI assistant. Follow the task instructions exactly, stay concise, "
+    "and return structured output when requested."
+)
 
 
-def call_llm(prompt: str) -> str:
+def call_llm(prompt: str, system_prompt: str | None = None) -> str:
     try:
         response = client.chat.completions.create(
             # model="gpt-3.5-turbo",
             model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": "You are an intelligent AI assistant."},
+                {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,

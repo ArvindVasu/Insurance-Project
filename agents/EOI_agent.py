@@ -130,6 +130,30 @@ DECLARATION_TEXT = (
     "accurate to the best of my/our knowledge. Submission of this form does not guarantee acceptance "
     "or issuance of any insurance policy or partnership."
 )
+EOI_FIELD_EXTRACTION_SYSTEM_PROMPT = (
+    "You are an insurance broker submission extraction engine. Extract only the requested fields, "
+    "return only valid JSON when asked, do not invent missing values, and keep outputs concise and deterministic."
+)
+EOI_RISK_PROFILE_SYSTEM_PROMPT = (
+    "You are an underwriting risk-profile extraction engine. Return only valid JSON with the exact keys requested, "
+    "using broker submission evidence only and 'Not specified' when information is absent."
+)
+EOI_GEO_WEB_SUMMARY_SYSTEM_PROMPT = (
+    "You are an underwriting analyst summarizing external web snippets for geography-based risk. "
+    "Write 2 to 3 complete sentences focused on calamity, crime, strike, and underwriting relevance."
+)
+EOI_SUBMISSION_SUMMARY_SYSTEM_PROMPT = (
+    "You are an underwriting analyst preparing EOI support notes from a broker submission. "
+    "Prioritize decision-relevant facts, underwriting pros and cons, missing information, and a practical recommendation."
+)
+EOI_EXEC_SUMMARY_SYSTEM_PROMPT = (
+    "You are an underwriting analyst drafting executive snapshot text. Return exactly 2 to 3 complete sentences in professional underwriting language, "
+    "focusing only on decision-relevant points."
+)
+EOI_TEMPLATE_FILL_SYSTEM_PROMPT = (
+    "You are an insurance EOI drafting engine. Use only the supplied evidence, preserve the template structure exactly, "
+    "return plain text only, and do not add commentary outside the requested form content."
+)
 
 
 def _extract_doc_text(path: str) -> str:
@@ -248,7 +272,7 @@ Use empty string if not found.
 TEXT:
 {doc_text[:12000]}
 """
-        llm_raw = call_llm(prompt)
+        llm_raw = call_llm(prompt, system_prompt=EOI_FIELD_EXTRACTION_SYSTEM_PROMPT)
         m = re.search(r"\{.*\}", llm_raw, flags=re.DOTALL)
         if m:
             try:
@@ -291,7 +315,7 @@ DOCUMENT TEXT:
 {doc_text[:12000]}
 """
     try:
-        raw = call_llm(prompt)
+        raw = call_llm(prompt, system_prompt=EOI_RISK_PROFILE_SYSTEM_PROMPT)
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
         if not match:
             return base
@@ -439,7 +463,7 @@ Title: {title}
 Snippet: {summary}
 """
     try:
-        raw = call_llm(prompt).strip()
+        raw = call_llm(prompt, system_prompt=EOI_GEO_WEB_SUMMARY_SYSTEM_PROMPT).strip()
         return _normalize_complete_sentences(raw, max_sentences=3)
     except Exception:
         return ""
@@ -576,7 +600,7 @@ Provide:
 2) Key underwriting pros and cons.
 3) A clear recommendation on whether to proceed, and why.
 """
-    return call_llm(prompt).strip()
+    return call_llm(prompt, system_prompt=EOI_SUBMISSION_SUMMARY_SYSTEM_PROMPT).strip()
 
 
 def build_vanna_prompt(user_prompt: str) -> str:
@@ -1620,7 +1644,7 @@ Agent Output:
 {raw_text[:4000]}
 """
     try:
-        raw = call_llm(prompt).strip()
+        raw = call_llm(prompt, system_prompt=EOI_EXEC_SUMMARY_SYSTEM_PROMPT).strip()
         normalized = _normalize_complete_sentences(raw, max_sentences=3)
     except Exception:
         normalized = _normalize_complete_sentences(raw_text, max_sentences=3)
@@ -1867,7 +1891,7 @@ TEMPLATE:
 """
 
     try:
-        filled = call_llm(prompt).strip()
+        filled = call_llm(prompt, system_prompt=EOI_TEMPLATE_FILL_SYSTEM_PROMPT).strip()
     except Exception:
         filled = ""
 
