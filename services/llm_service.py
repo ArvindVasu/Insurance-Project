@@ -60,7 +60,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 def call_llm(prompt: str) -> str:
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            # model="gpt-3.5-turbo",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": "You are an intelligent AI assistant."},
                 {"role": "user", "content": prompt}

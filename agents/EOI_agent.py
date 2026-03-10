@@ -2320,7 +2320,31 @@ def _set_paragraph_text_preserve_format(p, text: str, force_bold: bool | None = 
         run = p.add_run("")
         if force_bold is not None:
             run.bold = force_bold
-    p.runs[0].text = text
+    line_text = str(text or "")
+    agent_heading_match = re.match(
+        r"^\s*(?:\u2022\s*)?(SQL Agent Output \(Top Rows\):|Web Agent:|External Risk:|Geo Risk:|Intranet Agent Output:|Document Agent Summary:|Geo Risk SERP Summary:)\s*(.*)$",
+        line_text.strip(),
+        flags=re.IGNORECASE,
+    )
+    if force_bold is False and agent_heading_match:
+        label = agent_heading_match.group(1).strip()
+        remainder = (agent_heading_match.group(2) or "").strip()
+        if label.lower().startswith("intranet agent output:"):
+            p.runs[0].text = f"\u2022 {label}"
+        else:
+            p.runs[0].text = label
+        p.runs[0].bold = True
+        p.runs[0].font.name = "Calibri"
+        p.runs[0].font.size = Pt(11)
+        for r in p.runs[1:]:
+            r.text = ""
+        if remainder:
+            run = p.add_run(f" {remainder}")
+            run.bold = False
+            run.font.name = "Calibri"
+            run.font.size = Pt(11)
+        return
+    p.runs[0].text = line_text
     if force_bold is not None:
         p.runs[0].bold = force_bold
     # Keep non-heading/body lines visually consistent even if template paragraph style varies.
@@ -2352,9 +2376,9 @@ def _replace_heading_block(doc: Document, heading: str, lines: list[str]) -> Non
             "indicativeterms": "2. INDICATIVE TERMS",
             "aiderivedriskinsights": "3. AI-DERIVED RISK INSIGHTS",
             "specificconditionssubjectivities": "4. SPECIFIC CONDITIONS & SUBJECTIVITIES",
-            "nextsteps": "5. NEXT STEPS",
-            "disclaimer": "6. Disclaimer",
-            "authorizedsignature": "7. Authorized Signature",
+            # "nextsteps": "5. NEXT STEPS",
+            "disclaimer": "5. Disclaimer",
+            # "authorizedsignature": "7. Authorized Signature",
         }
         return mapping.get(_norm(clean), clean)
 
@@ -2412,11 +2436,18 @@ def _replace_heading_block(doc: Document, heading: str, lines: list[str]) -> Non
     write_index = start + 1
     for line in lines:
         if write_index < end:
+            try:
+                paras[write_index].style = "Normal"
+            except Exception:
+                pass
             _set_paragraph_text_preserve_format(paras[write_index], line, force_bold=False)
             write_index += 1
         else:
             np = paras[end - 1].insert_paragraph_before("")
-            np.style = paras[end - 1].style
+            try:
+                np.style = "Normal"
+            except Exception:
+                np.style = paras[end - 1].style
             _set_paragraph_text_preserve_format(np, line, force_bold=False)
 
     while write_index < end:
@@ -2567,7 +2598,7 @@ def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
     for p in paras:
         txt = (p.text or "").strip()
         low = txt.lower()
-        if low.startswith("6. disclaimer"):
+        if low.startswith("5. disclaimer"):
             prev_blank = p.insert_paragraph_before("")
             _set_paragraph_text_preserve_format(prev_blank, "", force_bold=False)
             if not p.runs:
@@ -2579,7 +2610,7 @@ def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
             body = txt.split(":", 1)[1].strip() if ":" in txt else ""
             space_para = p.insert_paragraph_before("")
             _set_paragraph_text_preserve_format(space_para, "", force_bold=False)
-            _set_paragraph_text_preserve_format(p, "6. Disclaimer", force_bold=True)
+            _set_paragraph_text_preserve_format(p, "5. Disclaimer", force_bold=True)
             _insert_paragraph_after(
                 p,
                 body or "This document is an Expression of Interest only and does not constitute a contract of insurance.",
@@ -2590,7 +2621,7 @@ def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
     # Missing disclaimer: append with spacing and bold heading.
     doc.add_paragraph("")
     h = doc.add_paragraph("")
-    _set_paragraph_text_preserve_format(h, "6. Disclaimer", force_bold=True)
+    _set_paragraph_text_preserve_format(h, "5. Disclaimer", force_bold=True)
     doc.add_paragraph("This document is an Expression of Interest only and does not constitute a contract of insurance.")
 
 
@@ -2630,12 +2661,14 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
         "Web Agent",
         str(eoi_state.get("general_summary") or "Not available.").strip(),
         user_prompt,
-    ).replace("\n", " ")
+    )
     intranet_agent_short = _llm_exec_summary(
         "Intranet Agent",
         str(eoi_state.get("intranet_summary") or "Not available.").strip(),
         user_prompt,
-    ).replace("\n", " ")
+    )
+    web_agent_short = re.sub(r"\s+", " ", str(web_agent_short or "")).strip()
+    intranet_agent_short = re.sub(r"\s+", " ", str(intranet_agent_short or "")).strip()
 
     geo_tokens = web_risk.get("geo_tokens") or []
     detected = web_risk.get("detected_hazards") or {}
@@ -2647,16 +2680,15 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
         f"Our underwriting engine has assigned Risk Score {decision_payload.get('risk_score', 'N/A')} with decision {decision_payload.get('decision', 'N/A')}.",
         f"Confidence Score: {decision_payload.get('confidence_score', 'N/A')}.",
         f"Document Agent Summary: {doc_agent_full}",
-        f"Geography Risk Score (Web Agent): {web_risk.get('score', 'N/A')} ({web_risk.get('level', 'N/A')}).",
+        "Web Agent:",
+        f"External Risk: {web_agent_short}",
+        f"Geo Risk: Score {web_risk.get('score', 'N/A')} ({web_risk.get('level', 'N/A')}).",
         f"Geographies Analyzed: {', '.join(geo_tokens) if geo_tokens else 'Not specified'}.",
         f"Geography Hazard Flags: {', '.join(detected_labels)}.",
         f"Geo Risk SERP Summary: {_to_short_blurb(geo_web_summary or 'Not available.', max_sentences=3, max_chars=500)}",
         "SQL Agent Output (Top Rows):",
+        f"\u2022 Intranet Agent Output: {intranet_agent_short}",
     ]
-    ai_lines.extend([
-        f"Web Agent: {web_agent_short}",
-        f"Intranet Agent: {intranet_agent_short}",
-    ])
     if hard_rules:
         ai_lines.append(f"Hard Rule Hits: {'; '.join(hard_rules)}.")
     _replace_heading_block(doc, "AI-DERIVED RISK INSIGHTS", ai_lines)
@@ -2664,7 +2696,8 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
     # Strictly render SQL output as a Word table (header row + data rows)
     sql_anchor = None
     for p in _iter_all_paragraphs(doc):
-        if (p.text or "").strip().lower().startswith("sql agent output (top rows):"):
+        anchor_text = (p.text or "").strip().lower().lstrip("\u2022").strip()
+        if anchor_text.startswith("sql agent output (top rows):"):
             sql_anchor = p
             break
     if sql_anchor is not None:
