@@ -59,6 +59,14 @@ import logging
 
 load_dotenv()
 
+
+def _with_one_based_index(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if not isinstance(df, pd.DataFrame):
+        return df
+    display_df = df.copy()
+    display_df.index = range(1, len(display_df) + 1)
+    return display_df
+
 def _render_intranet_block(obj):
         st.markdown("---")
         
@@ -258,7 +266,7 @@ def _render_run_by_route(run):
             result_df = run.get("result")
             formatted = _format_dataframe_for_display(result_df)
             if isinstance(formatted, pd.DataFrame):
-                st.dataframe(formatted)
+                st.dataframe(_with_one_based_index(formatted))
             else:
                 st.text(formatted if formatted is not None else "_No result returned_")
 
@@ -288,7 +296,7 @@ def _render_run_by_route(run):
             st.subheader("Result:")
             formatted = _format_dataframe_for_display(run.get("result"))
             if isinstance(formatted, pd.DataFrame):
-                st.dataframe(formatted)
+                st.dataframe(_with_one_based_index(formatted))
             else:
                 st.text(formatted)
 

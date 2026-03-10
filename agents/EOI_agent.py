@@ -2329,8 +2329,26 @@ def _set_paragraph_text_preserve_format(p, text: str, force_bold: bool | None = 
     if force_bold is False and agent_heading_match:
         label = agent_heading_match.group(1).strip()
         remainder = (agent_heading_match.group(2) or "").strip()
+        try:
+            p.paragraph_format.left_indent = Inches(0)
+        except Exception:
+            pass
         if label.lower().startswith("intranet agent output:"):
+            # Prevent inherited numbered-list prefixes (e.g., "1.") for this bullet line.
+            try:
+                pPr = p._p.get_or_add_pPr()
+                numPr = pPr.find(qn("w:numPr"))
+                if numPr is not None:
+                    pPr.remove(numPr)
+            except Exception:
+                pass
             p.runs[0].text = f"\u2022 {label}"
+        elif label.lower().startswith("external risk:") or label.lower().startswith("geo risk:"):
+            try:
+                p.paragraph_format.left_indent = Inches(0.3)
+            except Exception:
+                pass
+            p.runs[0].text = label
         else:
             p.runs[0].text = label
         p.runs[0].bold = True
@@ -2376,9 +2394,9 @@ def _replace_heading_block(doc: Document, heading: str, lines: list[str]) -> Non
             "indicativeterms": "2. INDICATIVE TERMS",
             "aiderivedriskinsights": "3. AI-DERIVED RISK INSIGHTS",
             "specificconditionssubjectivities": "4. SPECIFIC CONDITIONS & SUBJECTIVITIES",
-            # "nextsteps": "5. NEXT STEPS",
-            "disclaimer": "5. Disclaimer",
-            # "authorizedsignature": "7. Authorized Signature",
+            "nextsteps": "5. NEXT STEPS",
+            "disclaimer": "Disclaimer",
+            "authorizedsignature": "Authorized Signature",
         }
         return mapping.get(_norm(clean), clean)
 
@@ -2428,7 +2446,7 @@ def _replace_heading_block(doc: Document, heading: str, lines: list[str]) -> Non
             "nextsteps",
             "disclaimer",
             "authorizedsignature",
-        }:
+        } or t_norm.startswith("nextstep"):
             end = j
             break
 
@@ -2451,6 +2469,10 @@ def _replace_heading_block(doc: Document, heading: str, lines: list[str]) -> Non
             _set_paragraph_text_preserve_format(np, line, force_bold=False)
 
     while write_index < end:
+        try:
+            paras[write_index].style = "Normal"
+        except Exception:
+            pass
         _set_paragraph_text_preserve_format(paras[write_index], "", force_bold=False)
         write_index += 1
 
@@ -2598,7 +2620,7 @@ def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
     for p in paras:
         txt = (p.text or "").strip()
         low = txt.lower()
-        if low.startswith("5. disclaimer"):
+        if low.startswith("disclaimer"):
             prev_blank = p.insert_paragraph_before("")
             _set_paragraph_text_preserve_format(prev_blank, "", force_bold=False)
             if not p.runs:
@@ -2610,7 +2632,7 @@ def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
             body = txt.split(":", 1)[1].strip() if ":" in txt else ""
             space_para = p.insert_paragraph_before("")
             _set_paragraph_text_preserve_format(space_para, "", force_bold=False)
-            _set_paragraph_text_preserve_format(p, "5. Disclaimer", force_bold=True)
+            _set_paragraph_text_preserve_format(p, "Disclaimer", force_bold=True)
             _insert_paragraph_after(
                 p,
                 body or "This document is an Expression of Interest only and does not constitute a contract of insurance.",
@@ -2621,7 +2643,7 @@ def _ensure_disclaimer_heading_spacing(doc: Document) -> None:
     # Missing disclaimer: append with spacing and bold heading.
     doc.add_paragraph("")
     h = doc.add_paragraph("")
-    _set_paragraph_text_preserve_format(h, "5. Disclaimer", force_bold=True)
+    _set_paragraph_text_preserve_format(h, "Disclaimer", force_bold=True)
     doc.add_paragraph("This document is an Expression of Interest only and does not constitute a contract of insurance.")
 
 
@@ -2687,6 +2709,7 @@ def _build_template_based_eoi_doc(template_path: Path, user_prompt: str, eoi_sta
         f"Geography Hazard Flags: {', '.join(detected_labels)}.",
         f"Geo Risk SERP Summary: {_to_short_blurb(geo_web_summary or 'Not available.', max_sentences=3, max_chars=500)}",
         "SQL Agent Output (Top Rows):",
+        "",
         f"\u2022 Intranet Agent Output: {intranet_agent_short}",
     ]
     if hard_rules:

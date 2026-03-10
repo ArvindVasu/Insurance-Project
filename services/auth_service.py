@@ -44,6 +44,13 @@ def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
 
+def derive_user_name(email: str) -> str:
+    normalized = _normalize_email(email)
+    if "@" in normalized:
+        return normalized.split("@", 1)[0]
+    return normalized or "Not logged in"
+
+
 def _is_valid_email(email: str) -> bool:
     return bool(EMAIL_REGEX.match(_normalize_email(email)))
 
@@ -120,6 +127,7 @@ def logout_user() -> None:
     st.session_state["authenticated"] = False
     st.session_state.pop("user_email", None)
     st.session_state.pop("email", None)
+    st.session_state.pop("user_name", None)
     # Clear cached chat-session state so next login reloads correct user data.
     st.session_state.pop("chat_history", None)
     st.session_state.pop("active_chat_index", None)

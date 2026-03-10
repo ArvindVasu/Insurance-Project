@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import streamlit as st
+from services.auth_service import derive_user_name
 from services.auth_service import logout_user
 
 
@@ -253,8 +254,10 @@ def render_top_nav(show_search: bool = False) -> None:
     with nav_right:
         with st.popover("User Profile", use_container_width=True):
             user_email = st.session_state.get("user_email") or st.session_state.get("email") or "Not logged in"
+            user_name = st.session_state.get("user_name") or derive_user_name(user_email)
+            st.session_state["user_name"] = user_name
             st.markdown("### User Profile")
-            st.write("Name: Divyanshu Underwriter")
+            st.write(f"Name: {user_name}")
             st.write("Role: Senior Underwriter")
             st.write("Team: Commercial Lines")
             st.write(f"Email: {user_email}")

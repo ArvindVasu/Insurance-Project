@@ -5,6 +5,7 @@ import streamlit as st
 from services.auth_service import (
     authenticate_user,
     create_user,
+    derive_user_name,
     init_users_db,
     is_authenticated,
 )
@@ -126,6 +127,7 @@ if not is_authenticated():
                     st.session_state["authenticated"] = True
                     st.session_state["user_email"] = result
                     st.session_state["email"] = result
+                    st.session_state["user_name"] = derive_user_name(result)
                     st.success("Login successful.")
                     st.rerun()
                 else:
@@ -160,24 +162,107 @@ Use it to analyze portfolio performance, review submissions, run guided AI queri
 """
     )
 
-    st.markdown("### What You Can Do Here")
-    col1, col2 = st.columns(2)
-    with col1:
+    st.markdown("### Workspace Overview")
+    row1_col1, row1_col2 = st.columns(2)
+    with row1_col1:
         st.markdown(
             """
 <div class="panel">
-  <h4 style="margin:0 0 6px 0;">Daily Underwriting Workflow</h4>
+  <h4 style="margin:0 0 8px 0;">Dashboard</h4>
   <p style="margin:0;">
-  1. Review portfolio signals and exposure trends<br>
-  2. Inspect policy/submission documents<br>
-  3. Ask routed underwriting questions via chat<br>
-  4. Compare internal vs external benchmark insights
+  Monitor underwriting performance through portfolio-level KPIs, line-of-business trends, incurred loss movement, premium signals, and high-level exposure views. Use this page first to understand where the book is improving or deteriorating.
   </p>
 </div>
 """,
             unsafe_allow_html=True,
         )
-    with col2:
+    with row1_col2:
+        st.markdown(
+            """
+<div class="panel">
+  <h4 style="margin:0 0 8px 0;">Document Insights</h4>
+  <p style="margin:0;">
+  Upload broker submissions, policy documents, and supporting files to extract structured summaries, underwriting-relevant fields, claims information, and risk signals. This workspace converts raw documents into analysis-ready inputs.
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
+        st.markdown(
+            """
+<div class="panel">
+  <h4 style="margin:0 0 8px 0;">Underwriter Chat</h4>
+  <p style="margin:0;">
+  Ask underwriting questions in a routed chat workflow that can draw on internal data, submission context, intranet guidance, and external signals. Use it for appetite checks, portfolio comparisons, and case-specific decision support.
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with row2_col2:
+        st.markdown(
+            """
+<div class="panel">
+  <h4 style="margin:0 0 8px 0;">EOI Generator</h4>
+  <p style="margin:0;">
+  Generate an Expression of Interest by combining broker submission parsing with SQL benchmarking, web risk signals, and internal underwriting guidance. The engine produces a scored recommendation and document-ready output for underwriting action.
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("### EOI Processing Summary")
+    eoi_col1, eoi_col2 = st.columns(2)
+    with eoi_col1:
+        st.markdown(
+            """
+<div class="panel">
+  <h4 style="margin:0 0 8px 0;">How The Broker Submission Is Processed</h4>
+  <p style="margin:0;">
+  1. The broker submission is uploaded and parsed by the Document Agent.<br>
+  2. Four data agents contribute evidence: SQL, Document, SERP, and Intranet.<br>
+  3. LOB-filtered portfolio benchmarking and external signals are normalized into a common score.<br>
+  4. The final 0-100 risk score is mapped to Write, Conditional, Refer, or Decline.
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with eoi_col2:
+        st.markdown(
+            """
+<div class="panel">
+  <h4 style="margin:0 0 8px 0;">How The Risk Score Is Calculated</h4>
+  <p style="margin:0;">
+  The EOI engine uses 8 weighted metrics: Loss Quality (25%), Loss Pattern (15%), Geographic Spread (15%), Risk Management Quality (10%), Revenue Scale Risk (10%), External Risk (10%), Coverage Complexity (10%), and Guideline Fit (5%). Hard rules such as sanctions, extreme loss ratio, or guideline blocks can override the score.
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("### What You Can Do Here")
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        st.markdown(
+            """
+<div class="panel">
+  <h4 style="margin:0 0 6px 0;">Daily Underwriting Workflow</h4>
+  <p style="margin:0;">
+  1. Start with Dashboard to assess portfolio health.<br>
+  2. Review incoming submissions in Document Insights.<br>
+  3. Use Underwriter Chat for case-specific analysis and follow-up questions.<br>
+  4. Move to EOI Generator when a document-backed underwriting output is needed.
+  </p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+    with action_col2:
         st.markdown(
             """
 <div class="panel">
@@ -186,7 +271,7 @@ Use it to analyze portfolio performance, review submissions, run guided AI queri
   • Dashboard: KPI snapshot and trend monitoring<br>
   • Document Insights: upload and analyze submissions<br>
   • Underwriter Chat: routed agentic Q&A<br>
-  • Portfolio Analytics: exposure and broker performance view
+  • EOI Generator: scored recommendation and formatted EOI output
   </p>
 </div>
 """,

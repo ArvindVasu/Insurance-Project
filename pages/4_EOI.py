@@ -43,6 +43,14 @@ SQL_HIDDEN_OUTPUT_COLUMNS = {
 }
 
 
+def _with_one_based_index(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    if not isinstance(df, pd.DataFrame):
+        return df
+    display_df = df.copy()
+    display_df.index = range(1, len(display_df) + 1)
+    return display_df
+
+
 
 
 def _decision_to_button_label(decision: str | None) -> str:
@@ -365,7 +373,7 @@ if last_output:
     formatted = _format_dataframe_for_display(result_df)
     if isinstance(formatted, pd.DataFrame) and not formatted.empty:
         st.markdown("### Internal Data Snapshot")
-        st.dataframe(formatted, use_container_width=True)
+        st.dataframe(_with_one_based_index(formatted), use_container_width=True)
 
     if last_output.get("general_summary"):
         st.markdown("### External Summary")

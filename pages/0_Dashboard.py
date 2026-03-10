@@ -19,17 +19,18 @@ st.markdown("### Portfolio Snapshot")
 
 kpis = fetch_kpis()
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Ultimate Premium", f"${kpis['total_premium']:,.0f}")
-col2.metric("Total Incurred Loss", f"${kpis['total_incurred']:,.0f}")
+col1.metric("Total Ultimate Premium (USD mn)", f"${kpis['total_premium'] / 1_000_000:,.2f}")
+col2.metric("Total Incurred Loss (USD mn)", f"${kpis['total_incurred'] / 1_000_000:,.2f}")
 col3.metric("Avg Loss Ratio", f"{kpis['avg_loss_ratio'] * 100:.2f}%")
-col4.metric("Avg IBNR", f"${kpis['avg_ibnr']:,.0f}")
+col4.metric("Avg Claims Frequency", f"{kpis['avg_claims_frequency']:.2f}")
 
 left, right = st.columns([1.1, 1])
 with left:
-    st.markdown("#### Exposure Year Trend")
+    st.markdown("#### Line of Business Trend (USD mn)")
     trend_df = fetch_recent_trend()
     if not trend_df.empty:
-        st.line_chart(trend_df.set_index("exposure_year")[["incurred_loss", "ultimate_premium"]])
+        chart_df = trend_df.set_index("line_of_business")[["incurred_loss", "ultimate_premium"]] / 1_000_000
+        st.bar_chart(chart_df)
 
 with right:
     st.markdown("#### LOB Loss Ratio")
