@@ -39,7 +39,7 @@ with left:
         y_min = min(all_values)
         y_max = max(all_values)
         spread = y_max - y_min
-        padding = max(spread * 0.12, 50.0)
+        padding = max(spread * 0.4, 50.0)
         domain_min = max(0.0, y_min - padding)
         domain_max = y_max + padding if spread > 0 else y_max + 100.0
 
@@ -68,10 +68,10 @@ with left:
         ax_left.set_ylim(domain_min, domain_max)
         ax_left.set_ylabel("USD mn")
         ax_left.set_xticks(positions)
-        ax_left.set_xticklabels(chart_df["line_of_business"], rotation=22, ha="right")
+        ax_left.set_xticklabels(chart_df["line_of_business"], rotation=45, ha="right")
         ax_left.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
         ax_left.set_axisbelow(True)
-        ax_left.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2, frameon=False)
+        ax_left.legend(loc="upper center", bbox_to_anchor=(0.4, -0.35), ncol=2, frameon=False)
 
         label_offset = max(spread * 0.02, 8.0)
         for bars in [incurred_bars, premium_bars]:
@@ -97,7 +97,7 @@ with left:
 
         st.pyplot(fig_left, use_container_width=True)
         plt.close(fig_left)
-        st.caption("Y-axis is tightened to make line-of-business movement easier to compare while keeping both series on the same scale.")
+        # st.caption("Y-axis is tightened to make line-of-business movement easier to compare while keeping both series on the same scale.")
 
 with right:
     st.markdown("#### LOB Incurred Loss Ratio")
@@ -165,7 +165,7 @@ with right:
 
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
-        st.caption("Chart uses a tightened ratio scale with direct labels so small LOB differences are easier to compare.")
+        # st.caption("Chart uses a tightened ratio scale with direct labels so small LOB differences are easier to compare.")
 
 st.markdown("### Workspace")
 st.info(
