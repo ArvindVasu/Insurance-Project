@@ -163,6 +163,9 @@ html, body, [data-testid="stAppViewContainer"] {
 [data-testid="stSidebarNav"] ul li:nth-child(6) a::before {
   content: "\\1F4C4  ";
 }
+[data-testid="stSidebarNav"] ul li:nth-child(7) a::before {
+  content: "\\1F3AC  ";
+}
 
 h1, h2, h3 {
   font-family: 'Space Grotesk', sans-serif !important;
