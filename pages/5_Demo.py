@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = PROJECT_ROOT / "Demo"
 METADATA_PATH = DEMO_DIR / "videos.json"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mpeg", ".mpg"}
+DEFAULT_DEMO_FILE = "Product_Demo.mp4"
 
 
 def _humanize_name(value: str) -> str:
@@ -82,6 +83,13 @@ def _discover_videos() -> list[dict]:
             }
         )
     return videos
+
+
+def _preferred_demo_file(videos: list[dict]) -> str | None:
+    if not videos:
+        return None
+    preferred = next((video["file"] for video in videos if video["file"].lower() == DEFAULT_DEMO_FILE.lower()), None)
+    return preferred or videos[0]["file"]
 
 
 def _render_thumbnail_card(video: dict, selected: bool) -> str:
@@ -174,12 +182,14 @@ if not videos:
     )
     st.stop()
 
+preferred_demo_file = _preferred_demo_file(videos)
+
 if "demo_selected_file" not in st.session_state:
-    st.session_state.demo_selected_file = videos[0]["file"]
+    st.session_state.demo_selected_file = preferred_demo_file
 
 available_files = {video["file"] for video in videos}
 if st.session_state.demo_selected_file not in available_files:
-    st.session_state.demo_selected_file = videos[0]["file"]
+    st.session_state.demo_selected_file = preferred_demo_file
 
 st.markdown("### Choose A Demo")
 thumb_cols = st.columns(2)
