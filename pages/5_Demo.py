@@ -37,6 +37,46 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
+def _default_demo_description(title: str) -> str:
+    normalized = " ".join(str(title or "").lower().split())
+
+    if "product demo" in normalized:
+        return (
+            "Overview of the ASTRA platform and how the main underwriting workflows connect across the product. "
+            "Use this demo to understand the end-to-end user journey."
+        )
+    if "dashboard" in normalized:
+        return (
+            "Shows how the Dashboard surfaces portfolio KPIs, line-of-business trends, and loss-ratio signals for underwriters. "
+            "Use it to monitor book performance and spot movement quickly."
+        )
+    if "document insight" in normalized:
+        return (
+            "Demonstrates how Document Insights analyzes uploaded files and extracts underwriting-relevant summaries, gaps, and changes. "
+            "Use it for submission review and document comparison workflows."
+        )
+    if "underwriter chat" in normalized:
+        return (
+            "The Underwriter Chat is an AI-powered assistant that answers underwriting queries by intelligently routing them to internal data, external sources, or company guidelines. "
+            "It delivers transparent, auditable insights—combining analytics, market intelligence, and compliance in one place."
+        )
+    if "eoi" in normalized or "expression of interest" in normalized:
+        return (
+            "Shows how the EOI workflow combines broker submission analysis, internal benchmarking, and external signals to create a decision-ready output. "
+            "Use it to generate a scored underwriting recommendation and final EOI document."
+        )
+    if "portfolio" in normalized:
+        return (
+            "Highlights portfolio-level analytics used to compare performance across classes, brokers, and underwriting segments. "
+            "Use it to review concentration and trend behavior."
+        )
+
+    return (
+        f"Demonstrates the {title} workflow within ASTRA and highlights the main user actions available on that page. "
+        "Use it as a quick walkthrough of the feature."
+    )
+
+
 def _load_metadata() -> dict[str, dict]:
     if not METADATA_PATH.exists():
         return {}
@@ -69,7 +109,7 @@ def _discover_videos() -> list[dict]:
         title = str(meta.get("title") or _humanize_name(path.stem))
         description = str(
             meta.get("description")
-            or "Demo video for this workflow. Add a description in `Demo/videos.json` to customize this card."
+            or _default_demo_description(title)
         )
         tags = meta.get("tags") if isinstance(meta.get("tags"), list) else []
         videos.append(
@@ -222,7 +262,7 @@ with right_col:
 """,
         unsafe_allow_html=True,
     )
-    st.info(
-        "To add more demo entries later, drop additional video files into `Insurance-Project/Demo`. "
-        "If you want custom titles, descriptions, or tags, create `Insurance-Project/Demo/videos.json`."
-    )
+    # st.info(
+    #     "To add more demo entries later, drop additional video files into `Insurance-Project/Demo`. "
+    #     "If you want custom titles, descriptions, or tags, create `Insurance-Project/Demo/videos.json`."
+    # )
